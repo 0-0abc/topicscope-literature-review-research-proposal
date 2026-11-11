@@ -1151,7 +1151,12 @@ async function fetchS2(query: string, fromYear: number, toYear: number, retrieve
     url.searchParams.set("limit", "100");
     url.searchParams.set("year", `${fromYear}-${toYear}`);
     url.searchParams.set("fields", S2_FIELDS);
-    const response = await fetchJsonWithTimeout(url);
+    let response = await fetchJsonWithTimeout(url);
+    // S2 匿名池 100 次/5 分钟全站共享，429 高发；退避 2 秒重试一次，仍失败则降级为仅主源
+    if (response.status === 429) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      response = await fetchJsonWithTimeout(url);
+    }
     if (!response.ok) return null;
     const body = (await response.json()) as { data?: S2Work[] };
     const papers = (body.data ?? [])
