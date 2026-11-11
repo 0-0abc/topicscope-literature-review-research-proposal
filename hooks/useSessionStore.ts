@@ -2,6 +2,28 @@ import { useCallback, useEffect, useState } from "react";
 import type { Paper, SearchReport } from "@/lib/data/types";
 import type { EvidenceNote } from "@/hooks/useEvidenceStore";
 import type { ResearchPlan } from "@/lib/ai/plan";
+import type { FeasibilityResult, FeasibilityRef } from "@/lib/ai/feasibility";
+import type { ResearchReview, ReviewRef } from "@/lib/ai/review";
+
+/** 研究对话的一条消息（含引用徽标信息），存档后离线可回看。 */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  refs?: { n: number; field?: string }[];
+  evidenceIds?: string[];
+  uncertain?: string;
+}
+
+export interface SavedCheckup {
+  result: FeasibilityResult;
+  idea: string;
+  refs: FeasibilityRef[];
+}
+
+export interface SavedReview {
+  review: ResearchReview;
+  refs: ReviewRef[];
+}
 
 const DB_NAME = "topicscope";
 const DB_VERSION = 1;
@@ -25,6 +47,14 @@ export interface SavedSession {
   planTitle: string | null;
   /** 结构化方案，载入时完整恢复方案面板 */
   plan?: ResearchPlan | null;
+  /** 研究对话记录，载入时回填对话区 */
+  chat?: ChatMessage[];
+  /** 选题体检结论（含引用文献），载入时回填体检面板 */
+  checkup?: SavedCheckup | null;
+  /** 文献综述结论（含引用文献），载入时回填综述面板 */
+  review?: SavedReview | null;
+  /** 研究对话里加入方案草稿的结论 */
+  draftConclusions?: string[];
   /** 用户备注 */
   note: string;
 }
@@ -79,6 +109,10 @@ export interface SessionDraft {
   planMarkdown: string | null;
   planTitle: string | null;
   plan?: ResearchPlan | null;
+  chat?: ChatMessage[];
+  checkup?: SavedCheckup | null;
+  review?: SavedReview | null;
+  draftConclusions?: string[];
   note: string;
 }
 
@@ -117,6 +151,10 @@ export function useSessionStore() {
         planMarkdown: draft.planMarkdown,
         planTitle: draft.planTitle,
         plan: draft.plan ?? null,
+        chat: draft.chat ?? [],
+        checkup: draft.checkup ?? null,
+        review: draft.review ?? null,
+        draftConclusions: draft.draftConclusions ?? [],
         note: draft.note,
       };
       await putSession(session);

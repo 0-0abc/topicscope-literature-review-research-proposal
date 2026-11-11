@@ -5,11 +5,15 @@
  *   3. AI 方案输出校验   lib/ai/plan.ts           parsePlan / resolvePlanEvidence
  *   4. AI 综述质量门禁   lib/ai/review.ts         parseReview / reviewQualityGates
  *   5. 存档恢复合并      hooks/useEvidenceStore.ts mergeEvidenceNotes（纯函数，不调用 hook）
+ *   6. handler 服务端检索 functions/handler.ts     status / search（OpenAlex 两批 + S2 合并、
+ *                                                   429 退避重试、12h 共享缓存、Crossref 降级）
  *
  * 运行：node scripts/regression.mjs
  * 用 esbuild build API（write:false, bundle:true, platform:'node', format:'esm'，
  * alias 把 @ 映射到项目根）把上述模块打包成临时 ESM 后 import 断言。
- * 不写 dist、不跑 vite build、不改任何源文件；临时目录用完即删。
+ * 第 6 组单独打包自包含的 functions/handler.ts（platform:'neutral' + banner 注入 globalThis.Deno），
+ * 并覆写 globalThis.fetch 按 hostname 分发上游 mock，全程不触网、不改任何源文件。
+ * 不写 dist、不跑 vite build；临时目录用完即删。
  */
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -691,6 +695,362 @@ function testEvidenceMerge({ mergeEvidenceNotes, EVIDENCE_FIELDS, useEvidenceSto
 }
 
 // ---------------------------------------------------------------------------
+// 6. handler 服务端检索 functions/handler.ts（自包含 Deno 风格函数，不 import lib）
+//    esbuild bundle（platform:'neutral'）+ banner 注入 globalThis.Deno，
+//    覆写 globalThis.fetch 按 hostname 分发 OpenAlex / Semantic Scholar / Crossref mock。
+//    每个 case 用不同 query，避免 12h 共享缓存串扰；S2 持续 429 会真实退避等待 2 秒。
+// ---------------------------------------------------------------------------
+
+/** 异步分组：与同步 group 共用 passed / failures 计数 */
+async function groupAsync(name, fn) {
+  try {
+    await fn();
+  } catch (error) {
+    failures.push({ name, error });
+  }
+}
+
+const DENO_BANNER =
+  `globalThis.Deno = { env: { get: (k) => ({ QWEN_API_KEY: "t", OA_API_KEY: "t" }[k]) }, serve: () => {} };`;
+
+/** 打包自包含 handler：内存产物 -> 临时 .mjs -> 动态 import（不落盘到项目） */
+async function loadHandler() {
+  const result = await build({
+    absWorkingDir: root,
+    entryPoints: [path.join(root, "functions/handler.ts")],
+    outfile: "handler-regression.mjs", // write:false，仅用于计算产物路径
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "neutral",
+    target: "es2022",
+    banner: { js: DENO_BANNER },
+    logLevel: "silent",
+  });
+  const tmp = await mkdtemp(path.join(tmpdir(), "qorder-handler-regression-"));
+  try {
+    const dest = path.join(tmp, "handler.mjs");
+    await writeFile(dest, result.outputFiles[0].contents);
+    const mod = await import(pathToFileURL(dest).href);
+    if (typeof mod.handler !== "function") throw new Error("handler 打包产物缺少 handler 导出");
+    return mod.handler;
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+// --- 上游 mock 夹具（字段照 handler 的 OpenAlexWork / S2Work / CrossrefItem 接口） ---
+function oaWork({ n, title, doi, withAbstract, withOa }) {
+  const pdf = withOa ? `https://example.com/oa/${n}.pdf` : null;
+  return {
+    id: `https://openalex.org/W${n}`,
+    doi,
+    title,
+    publication_year: 2023,
+    cited_by_count: 100 - n,
+    type: "article",
+    topics: [{ display_name: "Machine Learning" }],
+    keywords: [{ display_name: "graph" }],
+    primary_location: {
+      source: { display_name: "Journal A" },
+      landing_page_url: `https://example.com/land/${n}`,
+    },
+    abstract_inverted_index: withAbstract
+      ? Object.fromEntries(["segmentation", "model", "results"].map((w, j) => [w, [j]]))
+      : null,
+    authorships: [{ author: { display_name: "Alice" } }],
+    open_access: { oa_url: pdf },
+    best_oa_location: { landing_page_url: null, pdf_url: pdf },
+  };
+}
+
+function s2Work({ id, title, doi, abstract, pdf }) {
+  return {
+    paperId: id,
+    title,
+    abstract,
+    year: 2024,
+    citationCount: 50,
+    venue: "Venue S2",
+    externalIds: doi ? { DOI: doi } : null,
+    openAccessPdf: pdf ? { url: pdf } : null,
+    fieldsOfStudy: ["Computer Science"],
+    authors: [{ name: "Bob" }],
+  };
+}
+
+function crItem({ doi, title, withAbstract, withPdf }) {
+  return {
+    DOI: doi,
+    title: [title],
+    issued: { "date-parts": [[2022]] },
+    "is-referenced-by-count": 7,
+    "container-title": ["Journal C"],
+    abstract: withAbstract
+      ? "<jats:p>Crossref 降级返回的摘要正文，长度超过四十字符以便被服务端接受为有效摘要文本。</jats:p>"
+      : undefined,
+    link: withPdf ? [{ URL: `https://crossref.org/${doi}.pdf`, "content-type": "application/pdf" }] : [],
+    URL: `https://crossref.org/${doi}`,
+    author: [{ given: "Ada", family: "Lovelace" }],
+    type: "journal-article",
+  };
+}
+
+const GNN_TITLE = "Graph Neural Networks for Molecules";
+const FILL_TITLE = "Federated Learning at Scale";
+const S2_NEW_TITLE = "Retrieval Augmented Generation Survey";
+const S2_FILL_PDF = "https://s2.org/fill.pdf";
+
+/** 高被引批：3 篇（W2 缺摘要且无 OA，W1/W3 有摘要） */
+const OA_CLASSIC = [
+  oaWork({ n: 1, title: GNN_TITLE, doi: "https://doi.org/10.1000/gnn", withAbstract: true, withOa: false }),
+  oaWork({ n: 2, title: FILL_TITLE, doi: null, withAbstract: false, withOa: false }),
+  oaWork({ n: 3, title: "Diffusion Models Survey", doi: "https://doi.org/10.1000/diff", withAbstract: true, withOa: true }),
+];
+/** 最新批：W3 与高被引批同 id（handler 内部按 id 合并）+ W4 与 W1 标题重复（serverDedup 移除） */
+const OA_RECENT = [
+  OA_CLASSIC[2],
+  oaWork({ n: 4, title: GNN_TITLE, doi: null, withAbstract: false, withOa: false }),
+];
+/** S2：1 篇同 DOI/标题重复 + 1 篇补摘要补 OA + 1 篇全新 */
+const S2_PAPERS = [
+  s2Work({ id: "s2-dup", title: "graph neural networks for molecules!", doi: "10.1000/GNN", abstract: "S2 重复篇摘要", pdf: null }),
+  s2Work({ id: "s2-fill", title: FILL_TITLE, doi: null, abstract: "S2 补齐的联邦学习摘要", pdf: S2_FILL_PDF }),
+  s2Work({ id: "s2-new", title: S2_NEW_TITLE, doi: null, abstract: "S2 新增论文摘要", pdf: "https://s2.org/new.pdf" }),
+];
+/** Crossref：2 篇有效 + 1 篇同 DOI 重复（去重移除 1 篇） */
+const CROSSREF_ITEMS = [
+  crItem({ doi: "10.2000/cr1", title: "Crossref Fallback Paper One", withAbstract: true, withPdf: true }),
+  crItem({ doi: "10.2000/cr2", title: "Crossref Fallback Paper Two", withAbstract: false, withPdf: false }),
+  crItem({ doi: "10.2000/cr1", title: "Crossref Fallback Paper One Duplicate", withAbstract: true, withPdf: true }),
+];
+
+const UPSTREAM_HOSTS = ["api.openalex.org", "api.semanticscholar.org", "api.crossref.org"];
+
+/** 覆写 globalThis.fetch：按 hostname 分发，scenario 可切换 S2 429 / OpenAlex 500 或抛错 */
+function installUpstreamMock() {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const scenario = { openalex: "ok", s2: "ok" };
+  globalThis.fetch = async (input) => {
+    const href = String(input);
+    calls.push(href);
+    const url = new URL(href);
+    if (url.hostname === "api.openalex.org") {
+      if (scenario.openalex === "throw") throw new Error("mock: OpenAlex 网络不可达");
+      if (scenario.openalex === "500") return new Response("upstream boom", { status: 500 });
+      const sort = url.searchParams.get("sort") ?? "";
+      const works = sort.startsWith("publication_date") ? OA_RECENT : OA_CLASSIC;
+      return Response.json({ results: works, meta: { count: works.length } });
+    }
+    if (url.hostname === "api.semanticscholar.org") {
+      if (scenario.s2 === "429") return new Response("rate limited", { status: 429 });
+      return Response.json({ data: S2_PAPERS, total: S2_PAPERS.length });
+    }
+    if (url.hostname === "api.crossref.org") {
+      return Response.json({ message: { items: CROSSREF_ITEMS, "total-results": CROSSREF_ITEMS.length } });
+    }
+    throw new Error(`回归 mock 未覆盖的上游请求: ${href}`);
+  };
+  return {
+    calls,
+    scenario,
+    countCalls(host) {
+      return calls.filter((href) => new URL(href).hostname === host).length;
+    },
+    restore() {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+/** 与 handler 一致的标题归一化，用于断言「重复标题只留一篇」 */
+function normTitle(value) {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "").trim();
+}
+
+async function testHandlerServer() {
+  let handler;
+  try {
+    handler = await loadHandler();
+  } catch (error) {
+    failures.push({ name: "handler: 打包并加载自包含服务端", error });
+    return;
+  }
+
+  const mock = installUpstreamMock();
+  const originalDeno = globalThis.Deno;
+  const search = async (q, extra = "") => {
+    const res = await handler(
+      new Request(`https://site.test/functions/v1/app/search?q=${encodeURIComponent(q)}${extra}`),
+    );
+    return { status: res.status, body: await res.json() };
+  };
+  // 每个 case 独立 query，避免共享缓存串扰
+  const Q_MERGE = "regression merge graph learning";
+  const Q_429 = "regression s2 rate limited";
+  const Q_FRESH = "regression cache probe";
+  const Q_CR_500 = "regression crossref http500";
+  const Q_CR_THROW = "regression crossref network";
+  let mergeCount = 0;
+
+  try {
+    await groupAsync("handler: status 报告服务端 key 配置", async () => {
+      const res = await handler(new Request("https://site.test/functions/v1/app/status"));
+      const body = await res.json();
+      eq(res.status, 200);
+      eq(body.ok, true);
+      eq(body.configured, true, "注入 QWEN_API_KEY => configured");
+      eq(body.oaConfigured, true, "注入 OA_API_KEY => oaConfigured");
+      eq(body.upstream, "ready");
+    });
+
+    await groupAsync("handler: 缺检索词 400 / 未知动作 404", async () => {
+      const missing = await handler(new Request("https://site.test/functions/v1/app/search"));
+      eq(missing.status, 400);
+      eq((await missing.json()).error, "bad_request");
+      const unknown = await handler(new Request("https://site.test/functions/v1/app/nope"));
+      eq(unknown.status, 404);
+    });
+
+    await groupAsync("handler: S2 成功 => 新增一篇/补齐摘要与 OA/重复标题只留一篇", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      const { status, body } = await search(Q_MERGE);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.cached, false);
+      eq(body.degraded, false);
+      eq(body.source, "openalex");
+      const papers = body.papers;
+      mergeCount = papers.length;
+      eq(papers.length, 4, "OpenAlex 两批按 id 合并 4 篇 + S2 新增 1 篇 - 标题重复 1 篇");
+      const fromS2 = papers.filter((p) => p.provenance.source === "semanticscholar");
+      eq(fromS2.length, 1, "S2 独有的那篇应作为新增合并进来");
+      eq(fromS2[0].title, S2_NEW_TITLE);
+      eq(fromS2[0].provenance.sourceId, "s2-new");
+      eq(fromS2[0].oaStatus, "verified");
+      const filled = papers.find((p) => p.title === FILL_TITLE);
+      ok(filled, "主源缺摘要的论文应仍在结果里");
+      ok(filled.abstract.includes("S2 补齐"), "S2 应为缺摘要的主源论文补齐摘要");
+      eq(filled.provenance.abstractAvailable, true);
+      eq(filled.provenance.source, "openalex", "补齐摘要不改变主源归属");
+      eq(filled.oaUrl, S2_FILL_PDF, "S2 应补齐开放全文链接");
+      eq(filled.oaStatus, "verified");
+      const sameTitle = papers.filter((p) => normTitle(p.title) === normTitle(GNN_TITLE));
+      eq(sameTitle.length, 1, "同 DOI/归一化标题的重复只保留一篇");
+      eq(sameTitle[0].provenance.source, "openalex", "重复时保留主源那篇");
+      const reports = body.report.sourceReports;
+      eq(reports.map((r) => r.source), ["openalex", "semanticscholar"]);
+      ok(reports.every((r) => r.failed === false), "两源都成功时 failed 均为 false");
+      eq(reports[0].returned, 4);
+      eq(reports[1].returned, 3);
+      const limitations = body.report.limitations.join("\n");
+      ok(limitations.includes("新增 1 篇"), "limitations 应说明 S2 新增篇数");
+      ok(limitations.includes("补齐"), "limitations 应说明补齐摘要/开放全文");
+      ok(limitations.includes("去重移除 1 篇"), "limitations 应说明多源去重");
+      eq(body.report.totalBeforeDedup, 5);
+      eq(body.report.totalAfterDedup, 4);
+      eq(body.report.removedByDedup, 1);
+      eq(mock.countCalls("api.openalex.org"), 2, "OpenAlex 高被引 + 最新两批各一次");
+      eq(mock.countCalls("api.semanticscholar.org"), 1);
+    });
+
+    await groupAsync("handler: S2 持续 429 => 退避重试一次后仅主源", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "429";
+      const s2Before = mock.countCalls("api.semanticscholar.org");
+      const startedAt = Date.now();
+      const { status, body } = await search(Q_429);
+      const elapsed = Date.now() - startedAt;
+      eq(status, 200);
+      eq(body.ok, true, "第二源失败不应让整个检索失败");
+      eq(body.cached, false);
+      eq(body.degraded, false, "仅第二源失败不算降级（主源仍可用）");
+      const s2Calls = mock.countCalls("api.semanticscholar.org") - s2Before;
+      ok(s2Calls >= 2, `429 应发生重试（实际 ${s2Calls} 次 S2 调用）`);
+      eq(s2Calls, 2, "只退避重试一次，不无限重试");
+      ok(elapsed >= 1900, `退避应等待约 2 秒（实际 ${elapsed}ms）`);
+      const s2Report = body.report.sourceReports.find((r) => r.source === "semanticscholar");
+      ok(s2Report, "失败的第二源也要出现在 sourceReports 里");
+      eq(s2Report.failed, true);
+      eq(s2Report.returned, 0);
+      ok(s2Report.error.includes("只来自 OpenAlex"), "应说明本次结果仅来自主源");
+      ok(body.papers.length > 0);
+      eq(body.papers.length, 3, "OpenAlex 4 篇去重后 3 篇");
+      ok(body.papers.every((p) => p.provenance.source === "openalex"), "429 时结果全部来自主源");
+      ok(!body.detail.includes("Semantic Scholar 补充合并"));
+    });
+
+    await groupAsync("handler: 相同 query 二次调用命中 12h 共享缓存", async () => {
+      mock.scenario.s2 = "ok";
+      const callsBefore = mock.calls.length;
+      const { status, body } = await search(Q_MERGE);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.cached, true);
+      eq(body.report.fromCache, true);
+      eq(body.papers.length, mergeCount, "缓存返回篇数与首次一致");
+      eq(mock.calls.length, callsBefore, "命中缓存不应再打上游");
+    });
+
+    await groupAsync("handler: 不同 query 不串缓存 / refresh=1 强制回源", async () => {
+      const fresh = await search(Q_FRESH);
+      eq(fresh.status, 200);
+      eq(fresh.body.cached, false, "不同 query 必须是新检索");
+      eq(fresh.body.report.fromCache, false);
+      ok(fresh.body.papers.length > 0);
+      const forced = await search(Q_MERGE, "&refresh=1");
+      eq(forced.body.cached, false, "refresh=1 应绕过缓存");
+      eq(forced.body.papers.length, mergeCount);
+    });
+
+    for (const [mode, query] of [["500", Q_CR_500], ["throw", Q_CR_THROW]]) {
+      await groupAsync(`handler: OpenAlex ${mode} => 降级 Crossref`, async () => {
+        mock.scenario.openalex = mode;
+        mock.scenario.s2 = "ok";
+        const oaBefore = mock.countCalls("api.openalex.org");
+        const s2Before = mock.countCalls("api.semanticscholar.org");
+        const { status, body } = await search(query);
+        eq(status, 200);
+        eq(body.ok, true);
+        eq(body.cached, false);
+        eq(body.degraded, true, "主源不可用应标记 degraded");
+        eq(body.report.degraded, true);
+        eq(body.source, "crossref");
+        const reports = body.report.sourceReports;
+        const sources = reports.map((r) => r.source);
+        ok(sources.includes("crossref"), "降级后 sourceReports 应含 crossref");
+        ok(sources.includes("openalex"), "失败的主源也要留痕");
+        const oaReport = reports.find((r) => r.source === "openalex");
+        eq(oaReport.failed, true);
+        eq(oaReport.returned, 0);
+        const crReport = reports.find((r) => r.source === "crossref");
+        eq(crReport.failed, false);
+        eq(crReport.returned, 2);
+        eq(body.papers.length, 2, "Crossref 3 条按 DOI 去重后 2 篇");
+        ok(body.papers.every((p) => p.provenance.source === "crossref"));
+        eq(body.report.removedByDedup, 1);
+        ok(body.report.limitations.join("").includes("降级到 Crossref"));
+        ok(body.detail.includes("Crossref"));
+        eq(mock.countCalls("api.openalex.org") - oaBefore, 2, "两批主源请求都失败后才降级");
+        eq(mock.countCalls("api.semanticscholar.org") - s2Before, 0, "降级路径不再打第二源");
+      });
+    }
+
+    await groupAsync("handler: 全程只打 mock 覆盖的上游（无真实网络）", () => {
+      ok(mock.calls.length > 0);
+      const hosts = [...new Set(mock.calls.map((href) => new URL(href).hostname))];
+      ok(hosts.every((h) => UPSTREAM_HOSTS.includes(h)), `出现了未预期的上游: ${hosts.join(",")}`);
+    });
+  } finally {
+    mock.restore();
+    if (originalDeno === undefined) delete globalThis.Deno;
+    else globalThis.Deno = originalDeno;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 const mods = await loadModules();
@@ -700,6 +1060,7 @@ testDirections(mods.directions);
 testPlan(mods.plan);
 testReview(mods.review);
 testEvidenceMerge(mods.evidence);
+await testHandlerServer();
 
 if (failures.length > 0) {
   for (const { name, error } of failures) {

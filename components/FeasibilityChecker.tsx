@@ -33,6 +33,7 @@ import {
 import { NEXT_STEP } from "@/lib/analysis/advisorReport";
 import { VERDICT_META, type RadarResult } from "@/lib/analysis/radar";
 import type { Paper, SearchReport } from "@/lib/data/types";
+import type { SavedCheckup } from "@/hooks/useSessionStore";
 import { downloadText, formatGB7714 } from "@/lib/export";
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -58,6 +59,10 @@ interface Props {
   byId: Map<string, Paper>;
   report: SearchReport | null;
   seed: CheckupSeed | null;
+  /** 从研究档案载入的体检结论（完整恢复） */
+  initialResult?: SavedCheckup | null;
+  /** 把最新体检结论交给上层，便于存进研究档案与带入方案 */
+  onResult?: (payload: SavedCheckup) => void;
 }
 
 const SEVERITY_LABEL = { critical: "致命", major: "重大", minor: "轻微" } as const;
@@ -65,14 +70,14 @@ const FIT_LABEL = { green: "绿灯 · 匹配", yellow: "黄灯 · 有条件", re
 const LEVEL_LABEL = { low: "低", medium: "中", high: "高" } as const;
 const ANSWER_LABEL = { yes: "是", partial: "部分", no: "否" } as const;
 
-export function FeasibilityChecker({ context, radar, byId, report, seed }: Props) {
+export function FeasibilityChecker({ context, radar, byId, report, seed, initialResult, onResult }: Props) {
   const available = useFunctionProbe();
-  const [idea, setIdea] = useState("");
+  const [idea, setIdea] = useState(initialResult?.idea ?? "");
   const [clusterId, setClusterId] = useState<number | null>(null);
   const [capability, setCapability] = useState<CapabilityProfile>(DEFAULT_CAPABILITY);
-  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [result, setResult] = useState<FeasibilityResult | null>(null);
-  const [refs, setRefs] = useState<FeasibilityRef[]>([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">(initialResult ? "ready" : "idle");
+  const [result, setResult] = useState<FeasibilityResult | null>(initialResult?.result ?? null);
+  const [refs, setRefs] = useState<FeasibilityRef[]>(initialResult?.refs ?? []);
   const [model, setModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -124,6 +129,7 @@ export function FeasibilityChecker({ context, radar, byId, report, seed }: Props
       setRefs(prepared.refs);
       setModel(body.model ?? null);
       setStatus("ready");
+      onResult?.({ result: parsed, idea: effectiveIdea, refs: prepared.refs });
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "体检失败，请稍后再试。");
       setStatus("error");

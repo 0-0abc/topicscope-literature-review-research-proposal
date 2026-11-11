@@ -1,18 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RadarView } from "@/components/RadarView";
-import { AlignView } from "@/components/AlignView";
 import { LibraryView } from "@/components/LibraryView";
-import { ReviewGenerator } from "@/components/ReviewGenerator";
-import { FeasibilityChecker, type CheckupSeed } from "@/components/FeasibilityChecker";
-import { PlanGenerator } from "@/components/PlanGenerator";
-import { ResearchChat } from "@/components/ResearchChat";
 import { PaperCard, paperEvidenceLevel } from "@/components/PaperCard";
 import { SessionArchive } from "@/components/SessionArchive";
+import type { CheckupSeed } from "@/components/FeasibilityChecker";
 import type { TopicCluster } from "@/lib/analysis/radar";
 import { buildDirectionContext } from "@/lib/ai/directions";
 import type { ResearchPlan } from "@/lib/ai/plan";
@@ -21,7 +17,17 @@ import type { ScorePreference } from "@/lib/analysis/scoring";
 import { readStoredApiKey, useCorpus, writeStoredApiKey } from "@/hooks/useCorpus";
 import { useEvidenceStore } from "@/hooks/useEvidenceStore";
 import { useScoreContext } from "@/hooks/useScoreContext";
-import type { SavedSession } from "@/hooks/useSessionStore";
+import type { SavedSession, ChatMessage, SavedCheckup, SavedReview } from "@/hooks/useSessionStore";
+
+const AlignView = lazy(() => import("@/components/AlignView").then((m) => ({ default: m.AlignView })));
+const ReviewGenerator = lazy(() => import("@/components/ReviewGenerator").then((m) => ({ default: m.ReviewGenerator })));
+const FeasibilityChecker = lazy(() => import("@/components/FeasibilityChecker").then((m) => ({ default: m.FeasibilityChecker })));
+const PlanGenerator = lazy(() => import("@/components/PlanGenerator").then((m) => ({ default: m.PlanGenerator })));
+const ResearchChat = lazy(() => import("@/components/ResearchChat").then((m) => ({ default: m.ResearchChat })));
+
+const LazyFallback = () => (
+  <div className="py-10 text-center text-xs text-muted-foreground">模块加载中…</div>
+);
 
 type NavGroup = "radar" | "library" | "chat" | "output" | "align";
 type OutputSub = "review" | "checkup" | "plan" | "archive";
@@ -49,6 +55,10 @@ export default function App() {
   } | null>(null);
   const [checkupSeed, setCheckupSeed] = useState<CheckupSeed | null>(null);
   const [planRestoreToken, setPlanRestoreToken] = useState(0);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [checkupState, setCheckupState] = useState<SavedCheckup | null>(null);
+  const [reviewState, setReviewState] = useState<SavedReview | null>(null);
+  const [constraintSeed, setConstraintSeed] = useState<{ text: string; token: number } | null>(null);
 
   const goTo = (t: string) => {
     const g = groupOf(t);
@@ -86,21 +96,32 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const resetSessionOutputs = () => {
+    setChatMessages([]);
+    setCheckupState(null);
+    setReviewState(null);
+    setPlanDraft([]);
+    setCheckupSeed(null);
+  };
+
   const handleSearch = () => {
     void corpus.searchOnline(query, apiKey || undefined);
     setClusterFilter(null);
+    resetSessionOutputs();
     goTo("radar");
   };
 
   const handleRefresh = () => {
     void corpus.searchOnline(query, apiKey || undefined, true);
     setClusterFilter(null);
+    resetSessionOutputs();
     goTo("radar");
   };
 
   const handleSnapshot = () => {
     void corpus.loadSnapshot();
     setClusterFilter(null);
+    resetSessionOutputs();
     goTo("radar");
   };
 
@@ -114,10 +135,30 @@ export default function App() {
     if (mode === "merge") evidence.mergeAll(session.evidenceNotes ?? {});
     else evidence.replaceAll(session.evidenceNotes ?? {});
     setLatestPlan(session.plan ? { plan: session.plan, markdown: session.planMarkdown ?? "" } : null);
+    setChatMessages(session.chat ?? []);
+    setCheckupState(session.checkup ?? null);
+    setReviewState(session.review ?? null);
+    setPlanDraft(session.draftConclusions ?? []);
+    setCheckupSeed(null);
     setPlanRestoreToken((token) => token + 1);
     setQuery(session.query);
     goTo("radar");
   };
+
+  const checkupSummary = useMemo(() => {
+    if (!checkupState) return null;
+    const c = checkupState.result;
+    const serious = c.flaws.filter((f) => f.severity !== "minor").map((f) => f.name);
+    return `${c.verdict.decision}：${c.verdict.reason}` +
+      (serious.length ? `；重大/致命缺陷：${serious.join("、")}` : "") +
+      (c.verdict.actions.length ? `；建议行动：${c.verdict.actions.join("、")}` : "");
+  }, [checkupState]);
+
+  const reviewSummary = useMemo(() => {
+    if (!reviewState) return null;
+    const r = reviewState.review;
+    return `《${r.title}》研究缺口：${r.gaps}；局限：${r.limitation}`;
+  }, [reviewState]);
 
   return (
     <div className="min-h-dvh bg-background text-foreground">
@@ -200,8 +241,18 @@ export default function App() {
 
       {corpus.error ? (
         <div className="border-b border-border bg-destructive/5">
-          <div className="mx-auto max-w-6xl px-4 py-2 text-xs text-destructive">
-            {corpus.error}
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 text-xs text-destructive">
+            <span className="min-w-0 flex-1">{corpus.error}</span>
+            <Button size="sm" variant="outline" onClick={handleRefresh} disabled={corpus.status === "loading"}>
+              重试检索
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {/[\u4e00-\u9fff]/.test(query) ? (
+        <div className="border-b border-border bg-muted/30">
+          <div className="mx-auto max-w-6xl px-4 py-1.5 text-[11px] text-muted-foreground">
+            检测到中文检索词：OpenAlex / Semantic Scholar 以英文索引为主，中文召回可能偏少，建议改用英文术语（如「医学图像分割」→ medical image segmentation）。
           </div>
         </div>
       ) : null}
@@ -279,6 +330,7 @@ export default function App() {
               onClusterFilterChange={setClusterFilter}
               report={corpus.report}
               levelOf={(paper) => paperEvidenceLevel(paper, evidence.notes[paper.id])}
+              verifiedCountOf={(paper) => evidence.notes[paper.id]?.verifiedFields?.length ?? 0}
               onOpenCard={setCardPaper}
               query={corpus.query}
               preference={preference}
@@ -287,20 +339,23 @@ export default function App() {
           </TabsContent>
 
           <TabsContent value="chat" className="mt-5">
-            <ResearchChat
-              key={corpus.query}
-              context={directionContext}
-              radar={corpus.radar}
-              papers={corpus.papers}
-              byId={corpus.byId}
-              evidenceNotes={evidence.notes}
-              report={corpus.report}
-              onAddDraft={(conclusion) =>
-                setPlanDraft((prev) =>
-                  prev.includes(conclusion) ? prev : [...prev, conclusion].slice(-8),
-                )
-              }
-            />
+            <Suspense fallback={<LazyFallback />}>
+              <ResearchChat
+                context={directionContext}
+                radar={corpus.radar}
+                papers={corpus.papers}
+                byId={corpus.byId}
+                evidenceNotes={evidence.notes}
+                report={corpus.report}
+                messages={chatMessages}
+                onMessagesChange={setChatMessages}
+                onAddDraft={(conclusion) =>
+                  setPlanDraft((prev) =>
+                    prev.includes(conclusion) ? prev : [...prev, conclusion].slice(-8),
+                  )
+                }
+              />
+            </Suspense>
           </TabsContent>
 
           <TabsContent value="output" className="mt-5">
@@ -336,37 +391,52 @@ export default function App() {
               </TabsList>
 
               <TabsContent value="review" className="mt-4">
-                <ReviewGenerator
-                  context={directionContext}
-                  radar={corpus.radar}
-                  byId={corpus.byId}
-                  report={corpus.report}
-                />
+                <Suspense fallback={<LazyFallback />}>
+                  <ReviewGenerator
+                    key={`review-${planRestoreToken}`}
+                    context={directionContext}
+                    radar={corpus.radar}
+                    byId={corpus.byId}
+                    report={corpus.report}
+                    initialResult={reviewState}
+                    onResult={setReviewState}
+                  />
+                </Suspense>
               </TabsContent>
 
               <TabsContent value="checkup" className="mt-4">
-                <FeasibilityChecker
-                  context={directionContext}
-                  radar={corpus.radar}
-                  byId={corpus.byId}
-                  report={corpus.report}
-                  seed={checkupSeed}
-                />
+                <Suspense fallback={<LazyFallback />}>
+                  <FeasibilityChecker
+                    key={`checkup-${planRestoreToken}`}
+                    context={directionContext}
+                    radar={corpus.radar}
+                    byId={corpus.byId}
+                    report={corpus.report}
+                    seed={checkupSeed}
+                    initialResult={checkupState}
+                    onResult={setCheckupState}
+                  />
+                </Suspense>
               </TabsContent>
 
               <TabsContent value="plan" className="mt-4">
-                <PlanGenerator
-                  key={planRestoreToken}
-                  context={directionContext}
-                  report={corpus.report}
-                  evidenceNotes={evidence.notes}
-                  papers={corpus.papers}
-                  draftConclusions={planDraft}
-                  restoredPlan={latestPlan}
-                  onPlanChange={(plan, markdown) =>
-                    setLatestPlan(plan ? { plan, markdown } : null)
-                  }
-                />
+                <Suspense fallback={<LazyFallback />}>
+                  <PlanGenerator
+                    key={planRestoreToken}
+                    context={directionContext}
+                    report={corpus.report}
+                    evidenceNotes={evidence.notes}
+                    papers={corpus.papers}
+                    draftConclusions={planDraft}
+                    checkupSummary={checkupSummary}
+                    reviewSummary={reviewSummary}
+                    constraintSeed={constraintSeed}
+                    restoredPlan={latestPlan}
+                    onPlanChange={(plan, markdown) =>
+                      setLatestPlan(plan ? { plan, markdown } : null)
+                    }
+                  />
+                </Suspense>
               </TabsContent>
 
               <TabsContent value="archive" className="mt-4">
@@ -378,6 +448,10 @@ export default function App() {
                   planMarkdown={latestPlan?.markdown ?? null}
                   planTitle={latestPlan?.plan.title ?? null}
                   plan={latestPlan?.plan ?? null}
+                  chat={chatMessages}
+                  checkup={checkupState}
+                  review={reviewState}
+                  draftConclusions={planDraft}
                   onRestore={restoreSession}
                 />
               </TabsContent>
@@ -385,7 +459,14 @@ export default function App() {
           </TabsContent>
 
           <TabsContent value="align" className="mt-5">
-            <AlignView />
+            <Suspense fallback={<LazyFallback />}>
+              <AlignView
+                onApplyToPlan={(text) => {
+                  setConstraintSeed({ text, token: Date.now() });
+                  goTo("plan");
+                }}
+              />
+            </Suspense>
           </TabsContent>
         </Tabs>
       </main>

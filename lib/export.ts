@@ -15,7 +15,11 @@ function escapeCsv(value: string | number | boolean | null): string {
   return text;
 }
 
-export function papersToCsv(papers: Paper[]): string {
+export function papersToCsv(
+  papers: Paper[],
+  /** 可选附加列：键作为表头追加在固定列之后，值逐行写入；不传时输出与原先完全一致 */
+  extra?: (paper: Paper) => Record<string, string>,
+): string {
   const header = [
     "title",
     "year",
@@ -31,7 +35,14 @@ export function papersToCsv(papers: Paper[]): string {
     "dedupKey",
     "abstractAvailable",
   ];
-  const rows = papers.map((paper) =>
+  const extraRows = extra ? papers.map(extra) : [];
+  const extraKeys: string[] = [];
+  for (const row of extraRows) {
+    for (const key of Object.keys(row)) {
+      if (!extraKeys.includes(key)) extraKeys.push(key);
+    }
+  }
+  const rows = papers.map((paper, index) =>
     [
       paper.title,
       paper.year,
@@ -46,11 +57,12 @@ export function papersToCsv(papers: Paper[]): string {
       paper.provenance.retrievedAt,
       paper.provenance.dedupKey,
       paper.provenance.abstractAvailable,
+      ...extraKeys.map((key) => extraRows[index]?.[key] ?? ""),
     ]
       .map(escapeCsv)
       .join(","),
   );
-  return [header.join(","), ...rows].join("\n");
+  return [[...header, ...extraKeys].join(","), ...rows].join("\n");
 }
 
 export function papersToMarkdown(
@@ -159,6 +171,12 @@ export interface PlanExportOptions {
     paperTitle: string;
     fields: { label: string; value: string; location?: string; verifiedAt?: string }[];
   }[];
+  /** 研究对话里用户认可的结论草稿 */
+  draftConclusions?: string[];
+  /** 前置选题体检结论摘要 */
+  checkupSummary?: string | null;
+  /** 前置文献综述结论摘要 */
+  reviewSummary?: string | null;
   generatedAt?: string;
   model?: string;
 }
@@ -255,6 +273,25 @@ export function researchPlanToMarkdown(
     }
   }
 
+  if (options.draftConclusions && options.draftConclusions.length > 0) {
+    lines.push("## 附：研究对话认可的草稿结论", "");
+    for (const item of options.draftConclusions) lines.push(`- ${item}`);
+    lines.push("");
+  }
+
+  if (options.checkupSummary || options.reviewSummary) {
+    lines.push("## 附：生成时参考的前置分析", "");
+    if (options.checkupSummary) lines.push(`- 选题体检：${options.checkupSummary}`);
+    if (options.reviewSummary) lines.push(`- 文献综述：${options.reviewSummary}`);
+    lines.push("");
+  }
+
+  if (options.report && options.report.limitations.length > 0) {
+    lines.push("## 附：本次检索的已知局限", "");
+    for (const item of options.report.limitations) lines.push(`- ${item}`);
+    lines.push("");
+  }
+
   lines.push("---", "");
   lines.push(
     `由 ${options.model ?? "大模型"} 基于 TopicScope 当前检索样本的统计结果生成` +
@@ -272,6 +309,7 @@ const CONSTRAINT_LABEL: Record<string, string> = {
   compute: "算力条件",
   timeline: "目标完成时间",
   openCode: "是否要求开放代码",
+  metricCaliber: "指标口径",
   target: "预期产出",
 };
 

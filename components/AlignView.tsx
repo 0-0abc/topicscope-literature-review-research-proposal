@@ -30,6 +30,7 @@ import { f1FromPrecisionRecall } from "@/lib/metrics/classification";
 import { diceFromIou, iouFromDice } from "@/lib/metrics/segmentation";
 import type { ConfusionMatrix, SegmentationClass } from "@/lib/metrics/types";
 import { metricValue, percent } from "@/lib/format";
+import { downloadText } from "@/lib/export";
 
 type TaskKind = "classification" | "segmentation" | "ranking" | "regression";
 
@@ -54,7 +55,12 @@ const DEFAULT_SEGMENTATION: SegmentationClass[] = [
   { label: "背景", intersection: 90, union: 110, predArea: 100, gtArea: 100 },
 ];
 
-export function AlignView() {
+export interface AlignViewProps {
+  /** 由上层提供时，结果区出现「带入研究方案」按钮，把当前口径结论塞进方案约束输入。 */
+  onApplyToPlan?: (text: string) => void;
+}
+
+export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
   const [task, setTask] = useState<TaskKind>("classification");
   const [matrix, setMatrix] = useState<ConfusionMatrix>(DEFAULT_MATRIX);
   const [binary, setBinary] = useState({ tp: 50, fp: 10, fn: 25, tn: 915 });
@@ -223,7 +229,11 @@ export function AlignView() {
 
       <Separator />
 
-      <AlignmentTool />
+      <AlignmentTool
+        results={results}
+        taskLabel={TASK_LABEL[task]}
+        onApplyToPlan={onApplyToPlan}
+      />
 
       <Separator />
 
@@ -545,7 +555,15 @@ function labelOf(id: string): string {
   return ALIGNMENT_OPTIONS.find((option) => option.id === id)?.label ?? METRIC_BY_ID.get(id)?.name ?? id;
 }
 
-function AlignmentTool() {
+function AlignmentTool({
+  results,
+  taskLabel,
+  onApplyToPlan,
+}: {
+  results: MetricResult[];
+  taskLabel: string;
+  onApplyToPlan?: (text: string) => void;
+}) {
   const [from, setFrom] = useState("miou");
   const [to, setTo] = useState("mdice");
   const [values, setValues] = useState<Record<string, string>>({ miou: "0.72", mdice: "" });
@@ -579,6 +597,40 @@ function AlignmentTool() {
       ? { ok: false as const, error: "分母为 0，此时该口径无唯一解。" }
       : { ok: true as const, value: result };
   }, [active, values, from, extraValues]);
+
+  const snapshot: AlignSnapshot = {
+    taskLabel,
+    results,
+    from,
+    to,
+    values,
+    extraValues,
+    formula: active ? formulaOf(active) : "",
+    outcome,
+    reason: reason ?? null,
+  };
+
+  // 有任一非空指标值，或换算给出了明确结论（成功 / 无解 / 换不了），才允许导出与带入。
+  const hasMetricValues = results.some((item) => item.value !== null);
+  const hasConclusion = outcome !== null || snapshot.reason !== null;
+  const canExport = hasMetricValues || hasConclusion;
+
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  const exportMarkdown = () => {
+    if (!canExport) return;
+    downloadText(`topicscope-align-${stamp}.md`, alignToMarkdown(snapshot), "text/markdown");
+  };
+
+  const exportCsv = () => {
+    if (!canExport) return;
+    downloadText(`topicscope-align-${stamp}.csv`, alignToCsv(snapshot), "text/csv");
+  };
+
+  const applyToPlan = () => {
+    if (!canExport || !onApplyToPlan) return;
+    onApplyToPlan(alignToPlanText(snapshot));
+  };
 
   return (
     <section className="space-y-3">
@@ -676,6 +728,41 @@ function AlignmentTool() {
               </div>
             </div>
           )}
+
+          <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+            <span className="label-caps mr-1">导出与复用</span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canExport}
+              onClick={exportMarkdown}
+            >
+              导出 Markdown
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canExport}
+              onClick={exportCsv}
+            >
+              导出 CSV
+            </Button>
+            {onApplyToPlan ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!canExport}
+                onClick={applyToPlan}
+              >
+                带入研究方案
+              </Button>
+            ) : null}
+            {!canExport ? (
+              <span className="text-xs text-muted-foreground">
+                补齐输入或算出指标后，才能导出 / 带入。
+              </span>
+            ) : null}
+          </div>
         </CardContent>
       </Card>
     </section>
@@ -698,6 +785,150 @@ function formulaOf(item: AlignmentCase): string {
     default:
       return "";
   }
+}
+
+/** 导出 / 带入共用的当前对齐快照。 */
+interface AlignSnapshot {
+  taskLabel: string;
+  results: MetricResult[];
+  from: string;
+  to: string;
+  values: Record<string, string>;
+  extraValues: { key: string; label: string }[];
+  formula: string;
+  outcome: { ok: true; value: number } | { ok: false; error: string } | null;
+  reason: string | null;
+}
+
+function mdCell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function csvCell(value: string | number | null | undefined): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function conversionInputs(s: AlignSnapshot): string[] {
+  const bits = [`${labelOf(s.from)} = ${s.values[s.from] || "—"}`];
+  for (const field of s.extraValues) {
+    const raw = s.values[field.key];
+    if (raw !== undefined && raw !== "") bits.push(`${field.label} = ${raw}`);
+  }
+  return bits;
+}
+
+function alignToMarkdown(s: AlignSnapshot): string {
+  const lines: string[] = ["# 指标口径对齐", ""];
+  lines.push(`- 任务类型：${s.taskLabel}`);
+  lines.push(`- 导出时间：${new Date().toISOString().slice(0, 16).replace("T", " ")}`);
+  lines.push("");
+
+  lines.push("## 当前数据可算出的指标", "");
+  lines.push("| 指标 | 数值 | 口径与公式 |");
+  lines.push("|---|---|---|");
+  for (const item of s.results) {
+    const cell = mdCell(`${item.note}（${item.formula}）`);
+    lines.push(
+      `| ${mdCell(item.name)} | ${item.value === null ? "—" : metricValue(item.value)} | ${cell} |`,
+    );
+  }
+  lines.push("");
+
+  lines.push("## 口径换算结论", "");
+  lines.push(`- 换算前口径：${labelOf(s.from)}`);
+  lines.push(`- 换算后口径：${labelOf(s.to)}`);
+  for (const bit of conversionInputs(s)) lines.push(`- 已知 / 补充输入：${bit}`);
+  if (s.formula) lines.push(`- 换算公式：${s.formula}`);
+  if (s.outcome?.ok) {
+    lines.push(`- 换算结果：${labelOf(s.to)} = ${metricValue(s.outcome.value)}`);
+  } else if (s.outcome && !s.outcome.ok) {
+    lines.push(`- 换算结果：无法求解 — ${s.outcome.error}`);
+  } else if (s.reason) {
+    lines.push(`- 换算结果：换不了 — ${s.reason}`);
+  } else {
+    lines.push("- 换算结果：输入尚未补齐，暂无结论。");
+  }
+  lines.push("");
+
+  const caveats: string[] = [];
+  for (const item of s.results) {
+    if (item.trap) caveats.push(`${item.name}：${item.trap}`);
+  }
+  if (s.outcome && !s.outcome.ok) caveats.push(s.outcome.error);
+  if (s.reason) caveats.push(s.reason);
+  caveats.push(
+    "换算只在口径定义一致时成立；跨数据集、跨平均方式（macro / micro）或不同正类定义的数字不可直接互换。",
+  );
+  lines.push("## 注意事项与局限", "");
+  for (const caveat of caveats) lines.push(`- ${caveat}`);
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+function alignToCsv(s: AlignSnapshot): string {
+  const header = ["指标", "数值", "口径说明", "公式", "注意事项"];
+  const rows: string[] = [header.map(csvCell).join(",")];
+
+  for (const item of s.results) {
+    rows.push(
+      [
+        item.name,
+        item.value === null ? "" : metricValue(item.value),
+        item.note,
+        item.formula,
+        item.trap ?? "",
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+  }
+
+  const convValue = s.outcome?.ok ? metricValue(s.outcome.value) : "";
+  const convNote = s.outcome?.ok
+    ? `由 ${conversionInputs(s).join("、")} 换算得到`
+    : s.outcome && !s.outcome.ok
+      ? s.outcome.error
+      : (s.reason ?? "输入尚未补齐，暂无结论");
+  const convTrap = s.outcome?.ok
+    ? "换算仅在口径定义一致时成立"
+    : (s.reason ?? (s.outcome && !s.outcome.ok ? s.outcome.error : ""));
+  rows.push(
+    [
+      `换算：${labelOf(s.from)} → ${labelOf(s.to)}`,
+      convValue,
+      convNote,
+      s.formula,
+      convTrap,
+    ]
+      .map(csvCell)
+      .join(","),
+  );
+
+  return rows.join("\n");
+}
+
+function alignToPlanText(s: AlignSnapshot): string {
+  const fromLabel = labelOf(s.from);
+  const toLabel = labelOf(s.to);
+  if (s.outcome?.ok) {
+    return (
+      `指标口径：${toLabel} 由 ${conversionInputs(s).join("、")} 按「${s.formula}」换算为 ` +
+      `${metricValue(s.outcome.value)}；注意仅在口径定义一致时成立，方案统一按此口径报告。`
+    );
+  }
+  if (s.outcome && !s.outcome.ok) {
+    return `指标口径：${fromLabel} 无法唯一换算为 ${toLabel}（${s.outcome.error}）；注意需补充原始数据后再定口径，不要直接引用换算值。`;
+  }
+  if (s.reason) {
+    return `指标口径：${fromLabel} 与 ${toLabel} 不可直接换算；注意${s.reason}`;
+  }
+  const lead = s.results.find((item) => item.value !== null);
+  if (lead) {
+    return `指标口径：当前按${s.taskLabel}任务口径计算，${lead.name} = ${metricValue(lead.value)}（${lead.formula}）；注意沿用该口径，勿与不同定义的文献数字直接对比。`;
+  }
+  return "指标口径：当前暂无可换算或已算出的指标，请先补齐数据。";
 }
 
 function IncompatibleTable() {

@@ -59,6 +59,7 @@ const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读�
 7. 逻辑链自洽：已有工作的局限 → 核心想法 → 挑战 → 方法 → 预期结果必须逐级互锁。每个挑战要有对应方法，每个预期结果要有方法或实验支撑，贡献不超过三条且都能落到具体章节；按这四步做自洽检查，发现断链就写明断在哪一环、怎么修，写进 chainAudit。
 8. 若输入带 verifiedEvidence（用户逐字段人工核对过的论文内容），优先采信它而不是你的推测；在背景/方法/基线/指标等章节引用时注明来自哪篇论文的哪个核对字段；verifiedEvidence 为空时不要假装有人工核对内容。
 9. 若输入带 draftConclusions（用户在研究对话中认可的结论草稿），把它们当作设计前提融进对应章节；与统计或核对证据冲突时，以后者为准并写明冲突。
+10. 若输入带 checkupSummary / reviewSummary（前置选题体检 / 文献综述的结论摘要），把它们当作已完成的分析前提：方案的问题定位、新颖性边界与相关工作应与之衔接；若你的判断与摘要冲突，写明冲突与理由，不要直接忽略。
 
 输出格式：只输出一个 JSON 对象。
 {"title":"方案题目","sections":{"problem":"一句话研究问题","background":"背景与已有证据（引用数字）","novelty":"方向位置与新颖性边界","hypotheses":"可验证假设（至少一条可证伪）","datasets":"数据集与获取方式（含可获得性状态）","baselines":"基线与对照","method":"方法设计","metrics":"指标与统计方法","experiments":"三层实验：最小可行实验 / 主实验 / 扩展实验，每层写明时间、算力、成功标准与失败后的替代路线","resources":"复现与资源需求","risks":"风险与失败判据","milestones":"里程碑与时间安排","outcomes":"预期结果与替代路线","references":"代表性参考文献（只能列 context.clusters[].papers 里出现过的论文，写标题+年份+被引，不要列期刊或数据集充数）","evidenceIndex":"证据索引：列出用到的 evidence ID 与对应数字"},"chainAudit":"四步逻辑链自洽检查：局限→想法、想法→挑战、挑战→方法、方法→结果，逐环写通过或断链与修法","scores":[{"dimension":"证据充分度","score":3,"reason":"扣分原因"}],"missing":["缺少的关键约束"],"evidenceIds":["cluster:xxx:size"]}
@@ -498,6 +499,10 @@ function readDraftConclusions(value: unknown): string[] {
     if (text) out.push(text);
   }
   return out;
+}
+
+function readSummary(value: unknown): string | null {
+  return readText(value, 600) || null;
 }
 
 function parseSuggestions(value: unknown, allowed: Set<string>) {
@@ -1638,6 +1643,8 @@ export async function handler(request: Request): Promise<Response> {
     const resources = parseResources(payload?.resources);
     const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
     const draftConclusions = readDraftConclusions(payload?.draftConclusions);
+    const checkupSummary = readSummary(payload?.checkupSummary);
+    const reviewSummary = readSummary(payload?.reviewSummary);
     const result = await callModel(
       apiKey,
       `${PLAN_SYSTEM_PROMPT}\n${PLAN_RESOURCE_RULE}`,
@@ -1654,6 +1661,8 @@ export async function handler(request: Request): Promise<Response> {
         })),
         verifiedEvidence,
         draftConclusions,
+        checkupSummary,
+        reviewSummary,
       },
       8192,
     );

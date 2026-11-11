@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,7 +19,7 @@ import {
   type ScoreBreakdown,
   type ScorePreference,
 } from "@/lib/analysis/scoring";
-import type { Paper, SearchReport } from "@/lib/data/types";
+import type { Paper, SearchReport, SourceName } from "@/lib/data/types";
 import { downloadText, papersToCsv, papersToMarkdown, searchReportToMarkdown } from "@/lib/export";
 import { compactNumber } from "@/lib/format";
 import { useScoreContext } from "@/hooks/useScoreContext";
@@ -41,6 +41,8 @@ interface Props {
   query: string;
   preference: ScorePreference;
   onPreferenceChange: (preference: ScorePreference) => void;
+  /** 该论文已人工核对的字段数，用于 CSV 导出附加列 */
+  verifiedCountOf?: (paper: Paper) => number;
 }
 
 export function LibraryView({
@@ -55,11 +57,18 @@ export function LibraryView({
   query,
   preference,
   onPreferenceChange,
+  verifiedCountOf,
 }: Props) {
   const [keyword, setKeyword] = useState("");
   const [minCitations, setMinCitations] = useState(0);
   const [sort, setSort] = useState<SortKey>("citations");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [yearFrom, setYearFrom] = useState<number | null>(null);
+  const [yearTo, setYearTo] = useState<number | null>(null);
+  const [oaFilter, setOaFilter] = useState<"all" | NonNullable<Paper["oaStatus"]>>("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | SourceName>("all");
+  const [evidenceFilter, setEvidenceFilter] = useState<"all" | EvidenceLevel>("all");
+  const [visibleCount, setVisibleCount] = useState(200);
 
   const { breakdownOf } = useScoreContext(query, radar, assignment, preference);
 
@@ -80,6 +89,11 @@ export function LibraryView({
     const list = papers.filter((paper) => {
       if (clusterFilter !== null && assignment.get(paper.id) !== clusterFilter) return false;
       if (paper.citedByCount < minCitations) return false;
+      if (yearFrom !== null && paper.year < yearFrom) return false;
+      if (yearTo !== null && paper.year > yearTo) return false;
+      if (oaFilter !== "all" && (paper.oaStatus ?? "none") !== oaFilter) return false;
+      if (sourceFilter !== "all" && paper.provenance.source !== sourceFilter) return false;
+      if (evidenceFilter !== "all" && levelOf(paper) !== evidenceFilter) return false;
       if (!query) return true;
       const haystack = [
         paper.title,
@@ -101,15 +115,52 @@ export function LibraryView({
       const scoreB = totalScore(breakdowns.get(b.id) ?? []);
       return scoreB - scoreA || b.citedByCount - a.citedByCount;
     });
-  }, [papers, keyword, minCitations, sort, clusterFilter, assignment, breakdowns]);
+  }, [
+    papers,
+    keyword,
+    minCitations,
+    sort,
+    clusterFilter,
+    assignment,
+    breakdowns,
+    yearFrom,
+    yearTo,
+    oaFilter,
+    sourceFilter,
+    evidenceFilter,
+    levelOf,
+  ]);
 
-  const visible = filtered.slice(0, 200);
+  // 任何筛选/排序/方向变化时回到第一页
+  useEffect(() => {
+    setVisibleCount(200);
+  }, [
+    papers,
+    keyword,
+    minCitations,
+    sort,
+    clusterFilter,
+    yearFrom,
+    yearTo,
+    oaFilter,
+    sourceFilter,
+    evidenceFilter,
+  ]);
+
+  const visible = filtered.slice(0, visibleCount);
   const allSelected = visible.length > 0 && visible.every((paper) => selected.has(paper.id));
 
   const exportPapers = (list: Paper[], format: "markdown" | "csv") => {
     const stamp = new Date().toISOString().slice(0, 10);
     if (format === "csv") {
-      downloadText(`topicscope-${stamp}.csv`, papersToCsv(list), "text/csv");
+      downloadText(
+        `topicscope-${stamp}.csv`,
+        papersToCsv(list, (paper) => ({
+          oaStatus: paper.oaStatus ?? "none",
+          verifiedFields: String(verifiedCountOf?.(paper) ?? 0),
+        })),
+        "text/csv",
+      );
       return;
     }
     const title = clusterFilter !== null ? `${clusterName.get(clusterFilter)} · 文献清单` : "文献清单";
@@ -197,6 +248,84 @@ export function LibraryView({
                 {(Object.keys(PREFERENCE_LABEL) as ScorePreference[]).map((key) => (
                   <NativeSelectOption key={key} value={key}>
                     {PREFERENCE_LABEL[key]}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </label>
+
+            <div className="space-y-1.5 text-xs text-muted-foreground">
+              年份区间
+              <div className="flex items-center gap-1.5">
+                <Input
+                  type="number"
+                  aria-label="起始年份"
+                  placeholder="起"
+                  value={yearFrom ?? ""}
+                  onChange={(event) => {
+                    const parsed = Number(event.target.value);
+                    setYearFrom(event.target.value === "" || Number.isNaN(parsed) ? null : parsed);
+                  }}
+                  className="h-9 w-full tabular-nums"
+                />
+                <span aria-hidden="true" className="shrink-0">
+                  –
+                </span>
+                <Input
+                  type="number"
+                  aria-label="结束年份"
+                  placeholder="止"
+                  value={yearTo ?? ""}
+                  onChange={(event) => {
+                    const parsed = Number(event.target.value);
+                    setYearTo(event.target.value === "" || Number.isNaN(parsed) ? null : parsed);
+                  }}
+                  className="h-9 w-full tabular-nums"
+                />
+              </div>
+            </div>
+
+            <label className="space-y-1.5 text-xs text-muted-foreground">
+              开放获取
+              <NativeSelect
+                value={oaFilter}
+                onChange={(event) =>
+                  setOaFilter(event.target.value as "all" | NonNullable<Paper["oaStatus"]>)
+                }
+                className="w-full"
+              >
+                <NativeSelectOption value="all">全部</NativeSelectOption>
+                <NativeSelectOption value="verified">已验证 OA</NativeSelectOption>
+                <NativeSelectOption value="publisher_only">仅出版商页</NativeSelectOption>
+                <NativeSelectOption value="none">无 OA 入口</NativeSelectOption>
+              </NativeSelect>
+            </label>
+
+            <label className="space-y-1.5 text-xs text-muted-foreground">
+              来源
+              <NativeSelect
+                value={sourceFilter}
+                onChange={(event) => setSourceFilter(event.target.value as "all" | SourceName)}
+                className="w-full"
+              >
+                <NativeSelectOption value="all">全部</NativeSelectOption>
+                <NativeSelectOption value="openalex">openalex</NativeSelectOption>
+                <NativeSelectOption value="semanticscholar">semanticscholar</NativeSelectOption>
+                <NativeSelectOption value="crossref">crossref</NativeSelectOption>
+                <NativeSelectOption value="snapshot">snapshot</NativeSelectOption>
+              </NativeSelect>
+            </label>
+
+            <label className="space-y-1.5 text-xs text-muted-foreground">
+              证据等级
+              <NativeSelect
+                value={evidenceFilter}
+                onChange={(event) => setEvidenceFilter(event.target.value as "all" | EvidenceLevel)}
+                className="w-full"
+              >
+                <NativeSelectOption value="all">全部</NativeSelectOption>
+                {(Object.keys(EVIDENCE_LEVEL_LABEL) as EvidenceLevel[]).map((level) => (
+                  <NativeSelectOption key={level} value={level}>
+                    {EVIDENCE_LEVEL_LABEL[level]}
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
@@ -393,6 +522,17 @@ export function LibraryView({
           </TableBody>
         </Table>
         </div>
+        {filtered.length > visibleCount ? (
+          <div className="flex justify-center pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setVisibleCount((count) => count + 200)}
+            >
+              显示更多（还有 {filtered.length - visibleCount} 篇）
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

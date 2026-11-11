@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -65,6 +65,12 @@ interface Props {
   restoredPlan?: { plan: ResearchPlan; markdown: string } | null;
   /** 研究对话里用户认可的结论草稿 */
   draftConclusions?: string[];
+  /** 前置选题体检结论摘要（随生成提交并写入导出） */
+  checkupSummary?: string | null;
+  /** 前置文献综述结论摘要（随生成提交并写入导出） */
+  reviewSummary?: string | null;
+  /** 指标口径对齐带入的约束种子 */
+  constraintSeed?: { text: string; token: number } | null;
   /** 把最新的方案交给上层，便于存进研究档案 */
   onPlanChange?: (plan: ResearchPlan | null, markdown: string) => void;
 }
@@ -98,7 +104,7 @@ function fingerprint(input: unknown): string {
   return JSON.stringify(input);
 }
 
-export function PlanGenerator({ context, report, evidenceNotes, papers, draftConclusions, restoredPlan, onPlanChange }: Props) {
+export function PlanGenerator({ context, report, evidenceNotes, papers, draftConclusions, checkupSummary, reviewSummary, constraintSeed, restoredPlan, onPlanChange }: Props) {
   const available = useFunctionProbe();
   const [constraints, setConstraints] = useState<Record<string, string>>({});
   const [resources, setResources] = useState<ResourceDraft[]>([]);
@@ -117,9 +123,19 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
     resources: ResourceDraft[];
     verified: VerifiedEvidence[];
     draftConclusions: string[];
+    checkupSummary: string | null;
+    reviewSummary: string | null;
   }>(null);
   const [storedMarkdown, setStoredMarkdown] = useState<string | null>(restoredPlan?.markdown ?? null);
   const [excludedPapers, setExcludedPapers] = useState<string[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [revised, setRevised] = useState(false);
+
+  useEffect(() => {
+    if (!constraintSeed) return;
+    setConstraints((prev) => ({ ...prev, metricCaliber: constraintSeed.text }));
+  }, [constraintSeed]);
 
   const verifiedAll = useMemo<VerifiedEvidence[]>(() => {
     const titleOf = new Map((papers ?? []).map((p) => [p.id, p.title]));
@@ -158,7 +174,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
 
   const stale =
     frozen !== null &&
-    fingerprint({ context, report, constraints, resources, verified, draftConclusions }) !==
+    fingerprint({ context, report, constraints, resources, verified, draftConclusions, checkupSummary, reviewSummary }) !==
       fingerprint(frozen);
 
   if (available !== "ready") {
@@ -188,7 +204,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
         license: item.license.trim() || undefined,
         accessCondition: item.accessCondition.trim() || undefined,
       }));
-    const snapshot = { context, report, constraints: inputConstraints, resources, verified, draftConclusions: draftConclusions ?? [] };
+    const snapshot = { context, report, constraints: inputConstraints, resources, verified, draftConclusions: draftConclusions ?? [], checkupSummary: checkupSummary ?? null, reviewSummary: reviewSummary ?? null };
     try {
       const payload = {
         context,
@@ -196,6 +212,8 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
         resources: inputResources,
         verifiedEvidence: verified,
         draftConclusions: draftConclusions ?? [],
+        checkupSummary: checkupSummary ?? null,
+        reviewSummary: reviewSummary ?? null,
       };
       const raw = await requestJson(
         "/functions/v1/app/plan",
@@ -263,6 +281,9 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
       })),
       unknownEvidence: resolvedItems.unknown,
       verifiedEvidence: useVerified,
+      draftConclusions: src?.draftConclusions ?? draftConclusions ?? [],
+      checkupSummary: src?.checkupSummary ?? checkupSummary ?? null,
+      reviewSummary: src?.reviewSummary ?? reviewSummary ?? null,
       generatedAt: meta.generatedAt ?? undefined,
       model: meta.model ?? undefined,
     });
@@ -271,7 +292,10 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
   const exportPlan = () => {
     if (!plan || !storedMarkdown) return;
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadText(`topicscope-plan-${stamp}.md`, storedMarkdown, "text/markdown");
+    const body = revised
+      ? `> 本导出含人工修订（修订于 ${new Date().toISOString().slice(0, 16).replace("T", " ")}），修订内容未经模型重新生成。\n\n${storedMarkdown}`
+      : storedMarkdown;
+    downloadText(`topicscope-plan-${stamp}.md`, body, "text/markdown");
   };
 
   return (
@@ -423,6 +447,20 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
           </div>
 
           <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <p className="label-caps">前置分析（体检 / 综述，随本次生成提交）</p>
+            {!checkupSummary && !reviewSummary ? (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                还没有前置分析。到「选题体检」或「文献综述」生成结论后，这里会带上摘要，方案将参考它们而不是从零推断。
+              </p>
+            ) : (
+              <ul className="list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                {checkupSummary ? <li>体检：{checkupSummary}</li> : null}
+                {reviewSummary ? <li>综述：{reviewSummary}</li> : null}
+              </ul>
+            )}
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
             <p className="label-caps">已核对证据（会随约束一起提交给模型）</p>
             {verifiedAll.length === 0 ? (
               <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -471,9 +509,28 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
               {status === "loading" ? "生成中…" : "生成研究方案"}
             </Button>
             {status === "ready" && plan ? (
-              <Button variant="outline" size="sm" onClick={exportPlan}>
-                导出方案 Markdown
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={exportPlan}>
+                  导出方案 Markdown
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    if (editing) {
+                      setStoredMarkdown(editText);
+                      setRevised(true);
+                      setEditing(false);
+                    } else {
+                      setEditText(storedMarkdown ?? "");
+                      setEditing(true);
+                    }
+                  }}
+                >
+                  {editing ? "保存修订" : "人工修订"}
+                </Button>
+                {revised ? <Badge variant="secondary">含人工修订</Badge> : null}
+              </>
             ) : null}
             <span className="text-[11px] text-muted-foreground">
               {context
@@ -481,6 +538,21 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
                 : "还没有检索结果"}
             </span>
           </div>
+
+          {editing ? (
+            <div className="space-y-1.5">
+              <p className="label-caps">人工修订方案文本（保存后导出使用修订版）</p>
+              <Textarea
+                value={editText}
+                onChange={(event) => setEditText(event.target.value)}
+                rows={16}
+                className="font-mono text-[11px]"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                修订只改导出文本，不重新调用模型；导出会标注「含人工修订」。点「保存修订」生效。
+              </p>
+            </div>
+          ) : null}
 
           {error ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">

@@ -4,11 +4,13 @@ import { Button } from "@/components/ui/button";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, requestJson } from "@/lib/api";
+import { downloadText } from "@/lib/export";
 import type { DirectionContext } from "@/lib/ai/directions";
 import type { TopicCluster } from "@/lib/analysis/radar";
 import type { Paper, SearchReport } from "@/lib/data/types";
 import type { EvidenceNote } from "@/hooks/useEvidenceStore";
 import { EVIDENCE_FIELDS } from "@/hooks/useEvidenceStore";
+import type { ChatMessage } from "@/hooks/useSessionStore";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
 
@@ -28,13 +30,6 @@ interface ChatRef {
   n: number;
   field?: string;
 }
-interface Message {
-  role: "user" | "assistant";
-  content: string;
-  refs?: ChatRef[];
-  evidenceIds?: string[];
-  uncertain?: string;
-}
 
 interface Props {
   context: DirectionContext | null;
@@ -44,14 +39,16 @@ interface Props {
   evidenceNotes: Record<string, EvidenceNote>;
   report: SearchReport | null;
   onAddDraft: (conclusion: string) => void;
+  /** 对话记录由上层持有，便于存进研究档案与恢复回填 */
+  messages: ChatMessage[];
+  onMessagesChange: (messages: ChatMessage[]) => void;
 }
 
-export function ResearchChat({ context, radar, papers, byId, evidenceNotes, report, onAddDraft }: Props) {
+export function ResearchChat({ context, radar, papers, byId, evidenceNotes, report, onAddDraft, messages, onMessagesChange }: Props) {
   const available = useFunctionProbe();
   const [focus, setFocus] = useState<string>("all");
   const [includeVerified, setIncludeVerified] = useState(true);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,8 +84,8 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
   const send = async () => {
     const question = input.trim();
     if (!question || !context || busy) return;
-    const history: Message[] = [...messages, { role: "user", content: question }];
-    setMessages(history);
+    const history: ChatMessage[] = [...messages, { role: "user", content: question }];
+    onMessagesChange(history);
     setInput("");
     setBusy(true);
     setError(null);
@@ -113,7 +110,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
         ERROR_MESSAGES,
       );
       const body = raw as { answer?: string; refs?: ChatRef[]; evidenceIds?: string[]; uncertain?: string };
-      setMessages([
+      onMessagesChange([
         ...history,
         {
           role: "assistant",
@@ -130,13 +127,46 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
     }
   };
 
+  const exportChat = () => {
+    const lines: string[] = [`# 研究对话记录`, ""];
+    lines.push(`- 检索式: ${report?.job.rawQuestion ?? "（离线样本）"}`);
+    lines.push(`- 导出时间: ${new Date().toISOString().slice(0, 16).replace("T", " ")}`);
+    lines.push(`- 消息数: ${messages.length}`, "");
+    for (const m of messages) {
+      lines.push(m.role === "user" ? `## 问` : `## 答`, "", m.content, "");
+      if (m.role === "assistant") {
+        if (m.refs?.length) {
+          lines.push(
+            "引用: " +
+              m.refs
+                .map((r) => {
+                  const p = focusPapers[r.n - 1];
+                  return `[${r.n}] ${p ? p.title : `论文${r.n}`}${r.field ? ` · ${r.field}（人工核对）` : " · 摘要"}`;
+                })
+                .join("；"),
+            "",
+          );
+        }
+        if (m.evidenceIds?.length) lines.push(`证据 ID: ${m.evidenceIds.join("、")}`, "");
+        if (m.uncertain) lines.push(`无法判断: ${m.uncertain}`, "");
+      }
+    }
+    lines.push("---", "", "对话基于 TopicScope 当前检索样本的统计与摘要节选，未送全文；结论需人工核实。");
+    downloadText(`topicscope-chat-${new Date().toISOString().slice(0, 10)}.md`, lines.join("\n"), "text/markdown");
+  };
+
   return (
     <div className="space-y-4">
       <div className="space-y-1">
-        <h2 className="heading-cn text-base">研究对话 · 围绕当前样本追问</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="heading-cn text-base">研究对话 · 围绕当前样本追问</h2>
+          <Button variant="outline" size="sm" onClick={exportChat} disabled={messages.length === 0}>
+            导出对话 Markdown
+          </Button>
+        </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
           模型只看到：当前聚类统计 + 下面选中的论文标题/摘要节选 + 你勾选的已核对证据。每条回答会标出它引用了哪篇论文的哪个字段；
-          认可的结论可以一键加入方案草稿。切换检索或会话时对话上下文自动隔离。
+          认可的结论可以一键加入方案草稿。对话会随研究档案保存，载入存档时回填；开始新检索会清空当前对话。
         </p>
       </div>
 

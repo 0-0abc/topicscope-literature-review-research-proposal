@@ -15,6 +15,7 @@ import {
 } from "@/lib/ai/review";
 import type { RadarResult } from "@/lib/analysis/radar";
 import type { Paper, SearchReport } from "@/lib/data/types";
+import type { SavedReview } from "@/hooks/useSessionStore";
 import { downloadText, formatGB7714 } from "@/lib/export";
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -34,13 +35,17 @@ interface Props {
   radar: RadarResult | null;
   byId: Map<string, Paper>;
   report: SearchReport | null;
+  /** 从研究档案载入的综述（完整恢复） */
+  initialResult?: SavedReview | null;
+  /** 把最新综述交给上层，便于存进研究档案与带入方案 */
+  onResult?: (payload: SavedReview) => void;
 }
 
-export function ReviewGenerator({ context, radar, byId, report }: Props) {
+export function ReviewGenerator({ context, radar, byId, report, initialResult, onResult }: Props) {
   const available = useFunctionProbe();
-  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [review, setReview] = useState<ResearchReview | null>(null);
-  const [refs, setRefs] = useState<ReviewRef[]>([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">(initialResult ? "ready" : "idle");
+  const [review, setReview] = useState<ResearchReview | null>(initialResult?.review ?? null);
+  const [refs, setRefs] = useState<ReviewRef[]>(initialResult?.refs ?? []);
   const [model, setModel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -74,6 +79,7 @@ export function ReviewGenerator({ context, radar, byId, report }: Props) {
       setRefs(prepared.refs);
       setModel(body.model ?? null);
       setStatus("ready");
+      onResult?.({ review: parsed, refs: prepared.refs });
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "生成失败，请稍后再试。");
       setStatus("error");

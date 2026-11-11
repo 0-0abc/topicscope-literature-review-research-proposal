@@ -12,6 +12,7 @@ import {
 } from "@/lib/ai/directions";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
+import { downloadText } from "@/lib/export";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "AI 建议暂时不可用：服务端还没有配置模型接口的 key。",
@@ -105,6 +106,34 @@ export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
 
       {status === "ready" ? (
         <div className="space-y-3">
+          <div className="flex justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const lines: string[] = ["# AI 研究方向建议", ""];
+                lines.push(`- 导出时间: ${new Date().toISOString().slice(0, 16).replace("T", " ")}`);
+                lines.push(`- 建议数: ${suggestions.length}`, "");
+                suggestions.forEach((s, i) => {
+                  const grounded = context ? isGrounded(s, context) : false;
+                  lines.push(`## [${i + 1}] ${s.title}`, "");
+                  lines.push(`- 研究问题: ${s.question}`);
+                  lines.push(`- 为什么现在做: ${s.why}`);
+                  lines.push(`- 切入方式: ${s.entry}`);
+                  lines.push(`- 数据与基线: ${s.evidence}`);
+                  lines.push(`- 算力与时间: ${s.cost}`);
+                  lines.push(`- 最大不确定性: ${s.risk}`);
+                  lines.push(`- 可做性: ${s.feasibility}/5`);
+                  lines.push(`- 引用核对: ${grounded ? "引用可定位 · 内容仍需核验" : "引用无法定位"}`);
+                  lines.push(`- 证据 ID: ${s.evidenceIds.join("、") || "（无）"}`, "");
+                });
+                lines.push("---", "", "建议基于 TopicScope 当前检索样本的统计结果生成，引用需人工核实后再使用。");
+                downloadText(`topicscope-directions-${new Date().toISOString().slice(0, 10)}.md`, lines.join("\n"), "text/markdown");
+              }}
+            >
+              导出建议 Markdown
+            </Button>
+          </div>
           {suggestions.map((suggestion, index) => {
             const grounded = context ? isGrounded(suggestion, context) : false;
             const resolved = context
