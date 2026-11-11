@@ -34,7 +34,6 @@ function groupOf(tab: string): NavGroup {
 export default function App() {
   const corpus = useCorpus();
   const evidence = useEvidenceStore();
-  const [tab, setTab] = useState("radar");
   const [group, setGroup] = useState<NavGroup>("radar");
   const [outputSub, setOutputSub] = useState<OutputSub>("plan");
   const [planDraft, setPlanDraft] = useState<string[]>([]);
@@ -52,9 +51,9 @@ export default function App() {
   const [planRestoreToken, setPlanRestoreToken] = useState(0);
 
   const goTo = (t: string) => {
-    setTab(t);
-    setGroup(groupOf(t));
-    if (t === "review" || t === "checkup" || t === "plan" || t === "archive") setOutputSub(t);
+    const g = groupOf(t);
+    setGroup(g);
+    if (g === "output") setOutputSub(t as OutputSub);
   };
 
   const startCheckup = (idea: string, clusterId: number | null) => {
@@ -207,12 +206,7 @@ export default function App() {
       ) : null}
 
       <main className="mx-auto max-w-6xl px-5 py-7">
-        <Tabs
-          value={tab}
-          onValueChange={(value) => {
-            goTo(value === "output" ? outputSub : value);
-          }}
-        >
+        <Tabs value={group} onValueChange={(value) => setGroup(value as NavGroup)}>
           <TabsList
             variant="line"
             className="w-full justify-start gap-6 overflow-x-auto whitespace-nowrap border-b border-border pb-0 sm:gap-8"
@@ -250,10 +244,6 @@ export default function App() {
             </TabsTrigger>
             <TabsTrigger
               value="output"
-              onClick={() => {
-                setGroup("output");
-                setTab(outputSub);
-              }}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               方案与档案
