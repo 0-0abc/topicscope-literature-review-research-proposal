@@ -20,7 +20,12 @@ const BASE_URL_CANDIDATES = [
 /** 公开接口的调用保护：同一 IP 每 10 分钟最多 20 次模型调用。 */
 const RATE_LIMIT_MAX = 20;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+// 进程级总预算：防止代理头变化或脚本绕过把模型 key 的额度打穿。
+// 这是单实例的基础保护，不是分布式限流；多实例部署需要网关或共享存储层面的限制。
+const INSTANCE_BUDGET_MAX = 400;
+const INSTANCE_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+let instanceBudget = { count: 0, resetAt: Date.now() + INSTANCE_BUDGET_WINDOW_MS };
 
 /** 上游是否拒绝过当前的 key：用于让前端在 key 失效时自动隐藏这个面板。 */
 let upstreamAuthFailed = false;
@@ -35,6 +40,14 @@ const SYSTEM_PROMPT = `你是一名科研选题分析助手，服务于正在读
 {"suggestions":[{"title":"方向短名","question":"一句话说清要回答的研究问题","why":"为什么值得做，必须引用给定数字","entry":"具体怎么做：用什么数据、什么方法、跟谁对照","evidence":"需要准备的数据与需要复现的基线","cost":"算力与时间的量级估计","risk":"这个方向最可能失败的原因","feasibility":3,"evidenceIds":["cluster:xxx:size","pair:xxx-yyy:lift"]}]}
 suggestions 给 3 到 5 条，按可做性从高到低排列；feasibility 是 1–5 的整数，5 表示用现有数据和方法就能启动；evidenceIds 给 2–6 个，全部来自用户提供的 evidence 列表。`;
 
+const CHAT_SYSTEM_PROMPT = `你是 TopicScope 的研究对话助手，围绕用户当前检索样本与已核对证据回答追问。硬约束：
+1. 只依据输入里的 context（聚类统计）、papers（编号论文标题/摘要节选）、verifiedEvidence（用户人工核对字段）回答；不要编造论文、数字或结论。
+2. 每条事实性陈述都要给 refs：[{n: 论文编号, field?: 核对字段label}]；统计类陈述给 evidenceIds（只能从 context.evidence 挑现成 ID）。没有依据就明说"当前材料无法判断"。
+3. 区分证据等级：verifiedEvidence 是人工核对（可信度最高），papers 摘要次之，仅标题再次之；回答里注明你用的是哪一层。
+4. 措辞按证据强度校准：单篇用"提示/说明"，多篇一致才用"表明"，仅机制用"可能"；不写无依据最高级、不把相关当因果。
+5. 回答简洁（≤400 字），面向"下一步怎么做"。
+输出格式：只输出一个 JSON 对象 {"answer":"...","refs":[{"n":1,"field":"方法流程"}],"evidenceIds":["cluster:xxx:size"],"uncertain":"当前材料无法判断的部分（没有则空字符串）"}`;
+
 const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读文献、写开题报告的学生和科研新人设计可执行的研究方案。
 硬性约束：
 1. 只能使用用户给出的 JSON 数据推理，不得引入数据之外的文献、作者、期刊或数字。
@@ -45,6 +58,7 @@ const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读�
 6. 每个 section 控制在 150 字以内，要点式，不要写长段落；不要重复同一句话。
 7. 逻辑链自洽：已有工作的局限 → 核心想法 → 挑战 → 方法 → 预期结果必须逐级互锁。每个挑战要有对应方法，每个预期结果要有方法或实验支撑，贡献不超过三条且都能落到具体章节；按这四步做自洽检查，发现断链就写明断在哪一环、怎么修，写进 chainAudit。
 8. 若输入带 verifiedEvidence（用户逐字段人工核对过的论文内容），优先采信它而不是你的推测；在背景/方法/基线/指标等章节引用时注明来自哪篇论文的哪个核对字段；verifiedEvidence 为空时不要假装有人工核对内容。
+9. 若输入带 draftConclusions（用户在研究对话中认可的结论草稿），把它们当作设计前提融进对应章节；与统计或核对证据冲突时，以后者为准并写明冲突。
 
 输出格式：只输出一个 JSON 对象。
 {"title":"方案题目","sections":{"problem":"一句话研究问题","background":"背景与已有证据（引用数字）","novelty":"方向位置与新颖性边界","hypotheses":"可验证假设（至少一条可证伪）","datasets":"数据集与获取方式（含可获得性状态）","baselines":"基线与对照","method":"方法设计","metrics":"指标与统计方法","experiments":"三层实验：最小可行实验 / 主实验 / 扩展实验，每层写明时间、算力、成功标准与失败后的替代路线","resources":"复现与资源需求","risks":"风险与失败判据","milestones":"里程碑与时间安排","outcomes":"预期结果与替代路线","references":"代表性参考文献（只能列 context.clusters[].papers 里出现过的论文，写标题+年份+被引，不要列期刊或数据集充数）","evidenceIndex":"证据索引：列出用到的 evidence ID 与对应数字"},"chainAudit":"四步逻辑链自洽检查：局限→想法、想法→挑战、挑战→方法、方法→结果，逐环写通过或断链与修法","scores":[{"dimension":"证据充分度","score":3,"reason":"扣分原因"}],"missing":["缺少的关键约束"],"evidenceIds":["cluster:xxx:size"]}
@@ -418,6 +432,74 @@ function readVerifiedEvidence(value: unknown): {
   return out;
 }
 
+function readChatMessages(value: unknown): { role: "user" | "assistant"; content: string }[] {
+  if (!Array.isArray(value)) return [];
+  const out: { role: "user" | "assistant"; content: string }[] = [];
+  for (const item of value.slice(-12)) {
+    if (!isRecord(item)) continue;
+    const role = item.role === "assistant" ? "assistant" : "user";
+    const content = readText(item.content, 1200);
+    if (!content) continue;
+    out.push({ role, content });
+  }
+  return out;
+}
+
+function readChatPapers(value: unknown): { n: number; title: string; year: number; abstract: string }[] {
+  if (!Array.isArray(value)) return [];
+  const out: { n: number; title: string; year: number; abstract: string }[] = [];
+  for (const item of value.slice(0, 12)) {
+    if (!isRecord(item)) continue;
+    const n = Number(item.n);
+    const title = readText(item.title, 200);
+    if (!Number.isFinite(n) || !title) continue;
+    out.push({
+      n,
+      title,
+      year: Number(item.year) || 0,
+      abstract: readText(item.abstract, 500),
+    });
+  }
+  return out;
+}
+
+function parseChat(value: unknown): {
+  answer: string;
+  refs: { n: number; field?: string }[];
+  evidenceIds: string[];
+  uncertain: string;
+} | null {
+  if (!isRecord(value)) return null;
+  const answer = readText(value.answer, 1600);
+  if (!answer) return null;
+  const refs: { n: number; field?: string }[] = [];
+  if (Array.isArray(value.refs)) {
+    for (const r of value.refs.slice(0, 8)) {
+      if (!isRecord(r)) continue;
+      const n = Number(r.n);
+      if (!Number.isFinite(n)) continue;
+      const field = readText(r.field, 40);
+      refs.push({ n, ...(field ? { field } : {}) });
+    }
+  }
+  return {
+    answer,
+    refs,
+    evidenceIds: filterEvidenceIds(value.evidenceIds),
+    uncertain: readText(value.uncertain, 400),
+  };
+}
+
+function readDraftConclusions(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value.slice(0, 8)) {
+    const text = readText(item, 600);
+    if (text) out.push(text);
+  }
+  return out;
+}
+
 function parseSuggestions(value: unknown, allowed: Set<string>) {
   if (!isRecord(value) || !Array.isArray(value.suggestions)) return [];
   const suggestions: Record<string, unknown>[] = [];
@@ -681,8 +763,13 @@ function clientIp(request: Request): string {
 }
 
 function checkRateLimit(request: Request): boolean {
-  const key = clientIp(request);
   const now = Date.now();
+  if (instanceBudget.resetAt <= now) {
+    instanceBudget = { count: 0, resetAt: now + INSTANCE_BUDGET_WINDOW_MS };
+  }
+  instanceBudget.count += 1;
+  if (instanceBudget.count > INSTANCE_BUDGET_MAX) return false;
+  const key = clientIp(request);
   const bucket = rateBuckets.get(key);
   if (!bucket || bucket.resetAt <= now) {
     rateBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
@@ -801,6 +888,7 @@ export async function handler(request: Request): Promise<Response> {
     action !== "plan" &&
     action !== "review" &&
     action !== "feasibility" &&
+    action !== "chat" &&
     action !== "status"
   ) {
     return fail("not_found", "没有这个接口。", 404);
@@ -946,10 +1034,37 @@ export async function handler(request: Request): Promise<Response> {
     );
   }
 
+  if (action === "chat") {
+    const messages = readChatMessages(payload?.messages);
+    if (messages.length === 0) {
+      return fail("bad_request", "请先输入一个问题。", 400);
+    }
+    const papers = readChatPapers(payload?.papers);
+    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
+    const result = await callModel(
+      apiKey,
+      CHAT_SYSTEM_PROMPT,
+      { context, papers, verifiedEvidence, messages },
+      2048,
+    );
+    if ("error" in result) {
+      return fail(result.error, ERROR_MESSAGE[result.error] ?? ERROR_MESSAGE.upstream_error, result.status);
+    }
+    const parsed = parseChat(extractJson(result.content));
+    if (!parsed) {
+      return fail("upstream_invalid_output", ERROR_MESSAGE.upstream_invalid_output, 502);
+    }
+    return json(
+      { ok: true, model: Deno.env.get("QWEN_MODEL") ?? DEFAULT_MODEL, ...parsed, generatedAt: new Date().toISOString() },
+      200,
+    );
+  }
+
   if (action === "plan") {
     const constraints = parseConstraints(payload?.constraints);
     const resources = parseResources(payload?.resources);
     const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
+    const draftConclusions = readDraftConclusions(payload?.draftConclusions);
     const result = await callModel(
       apiKey,
       `${PLAN_SYSTEM_PROMPT}\n${PLAN_RESOURCE_RULE}`,
@@ -965,6 +1080,7 @@ export async function handler(request: Request): Promise<Response> {
           accessCondition: resource.accessCondition,
         })),
         verifiedEvidence,
+        draftConclusions,
       },
       8192,
     );

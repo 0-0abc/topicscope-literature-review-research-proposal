@@ -10,6 +10,7 @@ import { LibraryView } from "@/components/LibraryView";
 import { ReviewGenerator } from "@/components/ReviewGenerator";
 import { FeasibilityChecker, type CheckupSeed } from "@/components/FeasibilityChecker";
 import { PlanGenerator } from "@/components/PlanGenerator";
+import { ResearchChat } from "@/components/ResearchChat";
 import { PaperCard, paperEvidenceLevel } from "@/components/PaperCard";
 import { SessionArchive } from "@/components/SessionArchive";
 import type { TopicCluster } from "@/lib/analysis/radar";
@@ -22,10 +23,21 @@ import { useEvidenceStore } from "@/hooks/useEvidenceStore";
 import { useScoreContext } from "@/hooks/useScoreContext";
 import type { SavedSession } from "@/hooks/useSessionStore";
 
+type NavGroup = "radar" | "library" | "chat" | "output" | "align";
+type OutputSub = "review" | "checkup" | "plan" | "archive";
+
+function groupOf(tab: string): NavGroup {
+  if (tab === "review" || tab === "checkup" || tab === "plan" || tab === "archive") return "output";
+  return tab as NavGroup;
+}
+
 export default function App() {
   const corpus = useCorpus();
   const evidence = useEvidenceStore();
   const [tab, setTab] = useState("radar");
+  const [group, setGroup] = useState<NavGroup>("radar");
+  const [outputSub, setOutputSub] = useState<OutputSub>("plan");
+  const [planDraft, setPlanDraft] = useState<string[]>([]);
   const [query, setQuery] = useState("medical image segmentation");
   const [apiKey, setApiKey] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -39,9 +51,15 @@ export default function App() {
   const [checkupSeed, setCheckupSeed] = useState<CheckupSeed | null>(null);
   const [planRestoreToken, setPlanRestoreToken] = useState(0);
 
+  const goTo = (t: string) => {
+    setTab(t);
+    setGroup(groupOf(t));
+    if (t === "review" || t === "checkup" || t === "plan" || t === "archive") setOutputSub(t);
+  };
+
   const startCheckup = (idea: string, clusterId: number | null) => {
     setCheckupSeed({ idea, clusterId });
-    setTab("checkup");
+    goTo("checkup");
   };
 
   const { breakdownOf } = useScoreContext(
@@ -72,24 +90,24 @@ export default function App() {
   const handleSearch = () => {
     void corpus.searchOnline(query, apiKey || undefined);
     setClusterFilter(null);
-    setTab("radar");
+    goTo("radar");
   };
 
   const handleRefresh = () => {
     void corpus.searchOnline(query, apiKey || undefined, true);
     setClusterFilter(null);
-    setTab("radar");
+    goTo("radar");
   };
 
   const handleSnapshot = () => {
     void corpus.loadSnapshot();
     setClusterFilter(null);
-    setTab("radar");
+    goTo("radar");
   };
 
   const inspectCluster = (cluster: TopicCluster) => {
     setClusterFilter(cluster.id);
-    setTab("library");
+    goTo("library");
   };
 
   const restoreSession = (session: SavedSession, mode: "replace" | "merge") => {
@@ -99,7 +117,7 @@ export default function App() {
     setLatestPlan(session.plan ? { plan: session.plan, markdown: session.planMarkdown ?? "" } : null);
     setPlanRestoreToken((token) => token + 1);
     setQuery(session.query);
-    setTab("radar");
+    goTo("radar");
   };
 
   return (
@@ -189,28 +207,29 @@ export default function App() {
       ) : null}
 
       <main className="mx-auto max-w-6xl px-5 py-7">
-        <Tabs value={tab} onValueChange={setTab}>
+        <Tabs
+          value={tab}
+          onValueChange={(value) => {
+            goTo(value === "output" ? outputSub : value);
+          }}
+        >
           <TabsList
             variant="line"
-            className="w-full justify-start gap-6 border-b border-border pb-0"
+            className="w-full justify-start gap-6 overflow-x-auto whitespace-nowrap border-b border-border pb-0 sm:gap-8"
           >
             <TabsTrigger
               value="radar"
+              onClick={() => setGroup("radar")}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
-              方向雷达
-            </TabsTrigger>
-            <TabsTrigger
-              value="align"
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
-            >
-              指标口径对齐
+              检索与雷达
             </TabsTrigger>
             <TabsTrigger
               value="library"
+              onClick={() => setGroup("library")}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
-              文献库
+              论文与证据
               {corpus.papers.length > 0 ? (
                 <Badge variant="outline" className="ml-1.5 rounded-full px-1.5 py-0 text-[10px]">
                   {corpus.papers.length}
@@ -218,28 +237,33 @@ export default function App() {
               ) : null}
             </TabsTrigger>
             <TabsTrigger
-              value="review"
+              value="chat"
+              onClick={() => setGroup("chat")}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
-              文献综述
+              研究对话
+              {planDraft.length > 0 ? (
+                <Badge variant="secondary" className="ml-1.5 rounded-full px-1.5 py-0 text-[10px]">
+                  {planDraft.length}
+                </Badge>
+              ) : null}
             </TabsTrigger>
             <TabsTrigger
-              value="checkup"
+              value="output"
+              onClick={() => {
+                setGroup("output");
+                setTab(outputSub);
+              }}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
-              选题体检
+              方案与档案
             </TabsTrigger>
             <TabsTrigger
-              value="plan"
+              value="align"
+              onClick={() => setGroup("align")}
               className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
-              研究方案
-            </TabsTrigger>
-            <TabsTrigger
-              value="archive"
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
-            >
-              研究档案
+              指标口径对齐
             </TabsTrigger>
           </TabsList>
 
@@ -253,10 +277,6 @@ export default function App() {
               onInspectCluster={inspectCluster}
               onCheckup={startCheckup}
             />
-          </TabsContent>
-
-          <TabsContent value="align" className="mt-5">
-            <AlignView />
           </TabsContent>
 
           <TabsContent value="library" className="mt-5">
@@ -275,50 +295,106 @@ export default function App() {
             />
           </TabsContent>
 
-          <TabsContent value="review" className="mt-5">
-            <ReviewGenerator
+          <TabsContent value="chat" className="mt-5">
+            <ResearchChat
+              key={corpus.query}
               context={directionContext}
               radar={corpus.radar}
-              byId={corpus.byId}
-              report={corpus.report}
-            />
-          </TabsContent>
-
-          <TabsContent value="checkup" className="mt-5">
-            <FeasibilityChecker
-              context={directionContext}
-              radar={corpus.radar}
-              byId={corpus.byId}
-              report={corpus.report}
-              seed={checkupSeed}
-            />
-          </TabsContent>
-
-          <TabsContent value="plan" className="mt-5">
-            <PlanGenerator
-              key={planRestoreToken}
-              context={directionContext}
-              report={corpus.report}
-              evidenceNotes={evidence.notes}
               papers={corpus.papers}
-              restoredPlan={latestPlan}
-              onPlanChange={(plan, markdown) =>
-                setLatestPlan(plan ? { plan, markdown } : null)
+              byId={corpus.byId}
+              evidenceNotes={evidence.notes}
+              report={corpus.report}
+              onAddDraft={(conclusion) =>
+                setPlanDraft((prev) =>
+                  prev.includes(conclusion) ? prev : [...prev, conclusion].slice(-8),
+                )
               }
             />
           </TabsContent>
 
-          <TabsContent value="archive" className="mt-5">
-            <SessionArchive
-              query={corpus.query}
-              papers={corpus.papers}
-              report={corpus.report}
-              evidenceNotes={evidence.notes}
-              planMarkdown={latestPlan?.markdown ?? null}
-              planTitle={latestPlan?.plan.title ?? null}
-              plan={latestPlan?.plan ?? null}
-              onRestore={restoreSession}
-            />
+          <TabsContent value="output" className="mt-5">
+            <Tabs value={outputSub} onValueChange={(value) => setOutputSub(value as OutputSub)}>
+              <TabsList
+                variant="line"
+                className="justify-start gap-5 overflow-x-auto whitespace-nowrap border-b border-border pb-0"
+              >
+                <TabsTrigger
+                  value="review"
+                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                >
+                  文献综述
+                </TabsTrigger>
+                <TabsTrigger
+                  value="checkup"
+                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                >
+                  选题体检
+                </TabsTrigger>
+                <TabsTrigger
+                  value="plan"
+                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                >
+                  研究方案
+                </TabsTrigger>
+                <TabsTrigger
+                  value="archive"
+                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                >
+                  研究档案
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="review" className="mt-4">
+                <ReviewGenerator
+                  context={directionContext}
+                  radar={corpus.radar}
+                  byId={corpus.byId}
+                  report={corpus.report}
+                />
+              </TabsContent>
+
+              <TabsContent value="checkup" className="mt-4">
+                <FeasibilityChecker
+                  context={directionContext}
+                  radar={corpus.radar}
+                  byId={corpus.byId}
+                  report={corpus.report}
+                  seed={checkupSeed}
+                />
+              </TabsContent>
+
+              <TabsContent value="plan" className="mt-4">
+                <PlanGenerator
+                  key={planRestoreToken}
+                  context={directionContext}
+                  report={corpus.report}
+                  evidenceNotes={evidence.notes}
+                  papers={corpus.papers}
+                  draftConclusions={planDraft}
+                  restoredPlan={latestPlan}
+                  onPlanChange={(plan, markdown) =>
+                    setLatestPlan(plan ? { plan, markdown } : null)
+                  }
+                />
+              </TabsContent>
+
+              <TabsContent value="archive" className="mt-4">
+                <SessionArchive
+                  query={corpus.query}
+                  papers={corpus.papers}
+                  report={corpus.report}
+                  evidenceNotes={evidence.notes}
+                  planMarkdown={latestPlan?.markdown ?? null}
+                  planTitle={latestPlan?.plan.title ?? null}
+                  plan={latestPlan?.plan ?? null}
+                  onRestore={restoreSession}
+                />
+              </TabsContent>
+            </Tabs>
+          </TabsContent>
+
+          <TabsContent value="align" className="mt-5">
+            <AlignView />
           </TabsContent>
         </Tabs>
       </main>

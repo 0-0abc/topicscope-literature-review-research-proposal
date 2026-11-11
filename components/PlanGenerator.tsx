@@ -63,6 +63,8 @@ interface Props {
   papers?: import("@/lib/data/types").Paper[];
   /** 从研究档案载入的方案（完整恢复） */
   restoredPlan?: { plan: ResearchPlan; markdown: string } | null;
+  /** 研究对话里用户认可的结论草稿 */
+  draftConclusions?: string[];
   /** 把最新的方案交给上层，便于存进研究档案 */
   onPlanChange?: (plan: ResearchPlan | null, markdown: string) => void;
 }
@@ -96,7 +98,7 @@ function fingerprint(input: unknown): string {
   return JSON.stringify(input);
 }
 
-export function PlanGenerator({ context, report, evidenceNotes, papers, restoredPlan, onPlanChange }: Props) {
+export function PlanGenerator({ context, report, evidenceNotes, papers, draftConclusions, restoredPlan, onPlanChange }: Props) {
   const available = useFunctionProbe();
   const [constraints, setConstraints] = useState<Record<string, string>>({});
   const [resources, setResources] = useState<ResourceDraft[]>([]);
@@ -114,6 +116,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, restored
     constraints: Record<string, string>;
     resources: ResourceDraft[];
     verified: VerifiedEvidence[];
+    draftConclusions: string[];
   }>(null);
   const [storedMarkdown, setStoredMarkdown] = useState<string | null>(restoredPlan?.markdown ?? null);
   const [excludedPapers, setExcludedPapers] = useState<string[]>([]);
@@ -155,7 +158,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, restored
 
   const stale =
     frozen !== null &&
-    fingerprint({ context, report, constraints, resources, verified }) !==
+    fingerprint({ context, report, constraints, resources, verified, draftConclusions }) !==
       fingerprint(frozen);
 
   if (available !== "ready") {
@@ -185,13 +188,14 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, restored
         license: item.license.trim() || undefined,
         accessCondition: item.accessCondition.trim() || undefined,
       }));
-    const snapshot = { context, report, constraints: inputConstraints, resources, verified };
+    const snapshot = { context, report, constraints: inputConstraints, resources, verified, draftConclusions: draftConclusions ?? [] };
     try {
       const payload = {
         context,
         constraints: inputConstraints,
         resources: inputResources,
         verifiedEvidence: verified,
+        draftConclusions: draftConclusions ?? [],
       };
       const raw = await requestJson(
         "/functions/v1/app/plan",
@@ -401,6 +405,21 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, restored
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <p className="label-caps">研究对话里加入的草稿结论（{draftConclusions?.length ?? 0}）</p>
+            {(draftConclusions?.length ?? 0) === 0 ? (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                到「研究对话」页签围绕当前样本追问，认可的回答点「加入方案草稿」后会出现在这里，并随本次生成提交给模型。
+              </p>
+            ) : (
+              <ul className="list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                {draftConclusions!.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">

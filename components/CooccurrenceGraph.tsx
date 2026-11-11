@@ -27,6 +27,7 @@ export function CooccurrenceGraph({ graph, className }: Props) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [width, setWidth] = useState(720);
+  const [view, setView] = useState<"graph" | "list">("graph");
 
   const neighbors = useMemo(() => {
     if (!graph) return new Set<string>();
@@ -236,6 +237,49 @@ export function CooccurrenceGraph({ graph, className }: Props) {
 
   return (
     <div className={cn("space-y-3", className)}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-muted-foreground">
+          小屏幕或键盘操作时，可切换为列表形式查看全部词对。
+        </span>
+        <button
+          type="button"
+          className="rounded border border-border px-2 py-1 text-[11px] hover:bg-muted"
+          onClick={() => setView((prev) => (prev === "graph" ? "list" : "graph"))}
+        >
+          {view === "graph" ? "切换为列表" : "切换为网络图"}
+        </button>
+      </div>
+      {view === "list" ? (
+        <div className="figure-panel max-h-[440px] overflow-y-auto px-3 py-2">
+          <table className="w-full text-xs">
+            <caption className="sr-only">关键词共现词对列表，按共现强度降序</caption>
+            <thead>
+              <tr className="border-b border-border text-left text-[11px] text-muted-foreground">
+                <th className="py-1.5 pr-2 font-medium">词对</th>
+                <th className="py-1.5 pr-2 text-right font-medium">共现次数</th>
+                <th className="py-1.5 text-right font-medium">共现强度（提升度）</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...graph.edges]
+                .sort((a, b) => b.weight - a.weight)
+                .map((edge) => {
+                  const source = graph.nodes.find((n) => n.id === edge.source);
+                  const target = graph.nodes.find((n) => n.id === edge.target);
+                  return (
+                    <tr key={`${edge.source}-${edge.target}`} className="border-b border-border/60 last:border-0">
+                      <td className="py-1.5 pr-2">
+                        {source?.label ?? edge.source} — {target?.label ?? edge.target}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right tabular-nums">{edge.weight}</td>
+                      <td className="py-1.5 text-right tabular-nums">{edge.lift.toFixed(2)}</td>
+                    </tr>
+                  );
+                })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
       <div ref={wrapperRef} className="figure-panel relative w-full overflow-hidden">
         <canvas
           ref={canvasRef}
@@ -252,6 +296,7 @@ export function CooccurrenceGraph({ graph, className }: Props) {
             : "悬停查看词频，点击固定关联"}
         </div>
       </div>
+      )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
         <span>圆点大小 = 出现论文数</span>
         <span>连线粗细 = 共现次数</span>
