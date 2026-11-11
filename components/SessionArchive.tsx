@@ -9,7 +9,10 @@ import { downloadText } from "@/lib/export";
 import { searchReportToMarkdown } from "@/lib/export";
 import type { Paper, SearchReport } from "@/lib/data/types";
 import type { EvidenceNote } from "@/hooks/useEvidenceStore";
+import type { ResearchPlan } from "@/lib/ai/plan";
 import { useSessionStore, type SavedSession } from "@/hooks/useSessionStore";
+
+export type RestoreMode = "replace" | "merge";
 
 interface Props {
   query: string;
@@ -18,7 +21,8 @@ interface Props {
   evidenceNotes: Record<string, EvidenceNote>;
   planMarkdown: string | null;
   planTitle: string | null;
-  onRestore: (session: SavedSession) => void;
+  plan: ResearchPlan | null;
+  onRestore: (session: SavedSession, mode: RestoreMode) => void;
 }
 
 export function SessionArchive({
@@ -28,6 +32,7 @@ export function SessionArchive({
   evidenceNotes,
   planMarkdown,
   planTitle,
+  plan,
   onRestore,
 }: Props) {
   const store = useSessionStore();
@@ -44,6 +49,7 @@ export function SessionArchive({
         evidenceNotes,
         planMarkdown,
         planTitle,
+        plan,
         note,
       });
       setMessage(`已保存 ${session.id}`);
@@ -148,6 +154,10 @@ export function SessionArchive({
 
       <section className="space-y-3">
         <h2 className="heading-cn text-sm">已保存的会话（{store.sessions.length}）</h2>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          载入会恢复检索快照、论文、证据标注与研究方案。「替换标注」用存档覆盖当前证据标注；
+          「合并载入」保留当前标注、同篇同字段冲突时以当前为准，其余并入，避免误丢正在做的核对。
+        </p>
         {store.sessions.length === 0 ? (
           <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground">
             还没有存档。保存一次，之后可以随时回到这个研究现场。
@@ -179,8 +189,11 @@ export function SessionArchive({
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" onClick={() => onRestore(session)}>
-                    载入
+                  <Button variant="outline" size="sm" onClick={() => onRestore(session, "replace")}>
+                    载入（替换标注）
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => onRestore(session, "merge")}>
+                    合并载入
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => exportMarkdown(session)}>
                     导出 Markdown

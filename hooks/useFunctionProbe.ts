@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
 
 /**
- * 探测站点后端接口是否可用：GET /functions/v1/app/status 返回 200 与 upstream 状态。
- * 站点没有部署后端、或服务端 key 被上游拒绝过时返回 false，调用方据此隐藏整块功能。
+ * 后端 AI 服务的具体状态，而不是一个简单的可用/不可用布尔值。
+ * 调用方据此展示「为什么不可用 + 还能做什么」，避免页签整块空白。
  */
-export function useFunctionProbe(path = "/functions/v1/app/status"): boolean | null {
-  const [available, setAvailable] = useState<boolean | null>(null);
+export type ProbeStatus =
+  | "loading"
+  | "ready"
+  | "not_deployed"
+  | "not_configured"
+  | "auth_failed"
+  | "error";
+
+export function useFunctionProbe(path = "/functions/v1/app/status"): ProbeStatus {
+  const [status, setStatus] = useState<ProbeStatus>("loading");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -16,14 +24,33 @@ export function useFunctionProbe(path = "/functions/v1/app/status"): boolean | n
       credentials: "same-origin",
     })
       .then(async (response) => {
-        if (!response.ok) {
-          setAvailable(false);
+        if (response.status === 404) {
+          setStatus("not_deployed");
           return;
         }
-        const body = (await response.json().catch(() => null)) as { upstream?: string } | null;
-        setAvailable(body?.upstream !== "auth_failed");
+        if (!response.ok) {
+          setStatus("error");
+          return;
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!contentType.includes("application/json")) {
+          // 静态托管把未知路径回落到 index.html，说明后端 Function 没有部署
+          setStatus("not_deployed");
+          return;
+        }
+        const body = (await response.json().catch(() => null)) as {
+          upstream?: string;
+          configured?: boolean;
+        } | null;
+        if (!body) {
+          setStatus("not_deployed");
+          return;
+        }
+        if (body.upstream === "auth_failed") setStatus("auth_failed");
+        else if (body.configured === false) setStatus("not_configured");
+        else setStatus("ready");
       })
-      .catch(() => setAvailable(false))
+      .catch(() => setStatus("error"))
       .finally(() => clearTimeout(timer));
     return () => {
       controller.abort();
@@ -31,5 +58,5 @@ export function useFunctionProbe(path = "/functions/v1/app/status"): boolean | n
     };
   }, [path]);
 
-  return available;
+  return status;
 }

@@ -12,6 +12,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, requestJson } from "@/lib/api";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
+import { AiServiceNotice } from "@/components/AiServiceNotice";
 import type { DirectionContext } from "@/lib/ai/directions";
 import {
   buildFeasibilityPayload,
@@ -98,7 +99,9 @@ export function FeasibilityChecker({ context, radar, byId, report, seed }: Props
     return buildFeasibilityPayload(context, radar, byId, clusterId, effectiveIdea, capability);
   }, [context, radar, byId, clusterId, effectiveIdea, capability]);
 
-  if (available !== true) return null;
+  if (available !== "ready") {
+    return <AiServiceNotice status={available} feature="选题体检" />;
+  }
 
   const generate = async () => {
     if (!prepared) return;

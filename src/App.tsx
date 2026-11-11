@@ -37,6 +37,7 @@ export default function App() {
     markdown: string;
   } | null>(null);
   const [checkupSeed, setCheckupSeed] = useState<CheckupSeed | null>(null);
+  const [planRestoreToken, setPlanRestoreToken] = useState(0);
 
   const startCheckup = (idea: string, clusterId: number | null) => {
     setCheckupSeed({ idea, clusterId });
@@ -91,9 +92,12 @@ export default function App() {
     setTab("library");
   };
 
-  const restoreSession = (session: SavedSession) => {
+  const restoreSession = (session: SavedSession, mode: "replace" | "merge") => {
     corpus.restore(session.papers, session.report, session.query);
-    evidence.replaceAll(session.evidenceNotes ?? {});
+    if (mode === "merge") evidence.mergeAll(session.evidenceNotes ?? {});
+    else evidence.replaceAll(session.evidenceNotes ?? {});
+    setLatestPlan(session.plan ? { plan: session.plan, markdown: session.planMarkdown ?? "" } : null);
+    setPlanRestoreToken((token) => token + 1);
     setQuery(session.query);
     setTab("radar");
   };
@@ -292,8 +296,12 @@ export default function App() {
 
           <TabsContent value="plan" className="mt-5">
             <PlanGenerator
+              key={planRestoreToken}
               context={directionContext}
               report={corpus.report}
+              evidenceNotes={evidence.notes}
+              papers={corpus.papers}
+              restoredPlan={latestPlan}
               onPlanChange={(plan, markdown) =>
                 setLatestPlan(plan ? { plan, markdown } : null)
               }
@@ -308,6 +316,7 @@ export default function App() {
               evidenceNotes={evidence.notes}
               planMarkdown={latestPlan?.markdown ?? null}
               planTitle={latestPlan?.plan.title ?? null}
+              plan={latestPlan?.plan ?? null}
               onRestore={restoreSession}
             />
           </TabsContent>
@@ -348,8 +357,11 @@ export default function App() {
         <div className="border-t border-border pt-4">
           <p className="label-caps mb-2">数据与方法说明</p>
           <p className="max-w-3xl text-[11px] leading-relaxed text-muted-foreground">
-            书目数据来自 OpenAlex 开放接口，标题与摘要版权归原作者所有。聚类与覆盖判定由 TF-IDF +
-            球面 k-means 在你的浏览器本地计算，不上传任何内容。指标口径的换算规则经过独立实现交叉验证。
+            书目数据来自 OpenAlex 开放接口，标题与摘要版权归原作者所有。聚类、覆盖判定、指标换算与六维评分由
+            TF-IDF + 球面 k-means 等在你的浏览器本地计算，不上传。但「在线检索」会把检索词发往 OpenAlex /
+            Crossref；「AI 方向建议 / 综述 / 体检 / 方案 / 对话」会把你选择的统计数字、论文标题与摘要节选、
+            以及你勾选的已核对证据内容发送到站点自带的模型服务。研究档案与证据标注只保存在本机浏览器。
+            指标口径的换算规则经过独立实现交叉验证。
           </p>
         </div>
       </footer>

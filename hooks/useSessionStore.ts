@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Paper, SearchReport } from "@/lib/data/types";
 import type { EvidenceNote } from "@/hooks/useEvidenceStore";
+import type { ResearchPlan } from "@/lib/ai/plan";
 
 const DB_NAME = "topicscope";
 const DB_VERSION = 1;
@@ -22,6 +23,8 @@ export interface SavedSession {
   /** 生成的研究方案（Markdown） */
   planMarkdown: string | null;
   planTitle: string | null;
+  /** 结构化方案，载入时完整恢复方案面板 */
+  plan?: ResearchPlan | null;
   /** 用户备注 */
   note: string;
 }
@@ -75,6 +78,7 @@ export interface SessionDraft {
   evidenceNotes: Record<string, EvidenceNote>;
   planMarkdown: string | null;
   planTitle: string | null;
+  plan?: ResearchPlan | null;
   note: string;
 }
 
@@ -112,6 +116,7 @@ export function useSessionStore() {
         evidenceNotes: draft.evidenceNotes,
         planMarkdown: draft.planMarkdown,
         planTitle: draft.planTitle,
+        plan: draft.plan ?? null,
         note: draft.note,
       };
       await putSession(session);

@@ -11,6 +11,7 @@ import {
   type DirectionSuggestion,
 } from "@/lib/ai/directions";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
+import { AiServiceNotice } from "@/components/AiServiceNotice";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "AI 建议暂时不可用：服务端还没有配置模型接口的 key。",
@@ -31,14 +32,16 @@ interface Props {
 export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
   // 先探一下后端在不在：status 接口存在时回 200，没有部署后端时是 404。
   // 站点没有部署后端、或服务端 key 被上游拒绝过时，不显示这一块，避免出现点不动的按钮。
-  const available = useFunctionProbe();
+  const probe = useFunctionProbe();
   const [unavailable, setUnavailable] = useState(false);
   const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [suggestions, setSuggestions] = useState<DirectionSuggestion[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [model, setModel] = useState<string | null>(null);
 
-  if (available !== true) return null;
+  if (probe !== "ready") {
+    return <AiServiceNotice status={probe} feature="AI 研究方向建议" />;
+  }
 
   const generate = async () => {
     if (!context) return;
@@ -121,7 +124,7 @@ export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
                       variant={grounded ? "secondary" : "destructive"}
                       className="rounded-sm"
                     >
-                      {grounded ? "依据可核对" : "依据无法核对"}
+                      {grounded ? "引用可定位 · 内容仍需核验" : "引用无法定位"}
                     </Badge>
                     {onCheckupIdea ? (
                       <Button

@@ -4,7 +4,7 @@ export type ScoreDimensionKey =
   | "问题匹配度"
   | "方法相关度"
   | "证据完整度"
-  | "可复现程度"
+  | "复现线索"
   | "时效与趋势价值"
   | "用户约束适配";
 
@@ -36,7 +36,7 @@ export interface ScoreContext {
   queryTerms: string[];
   /** 论文所属方向 id */
   clusterOf: (paper: Paper) => number | undefined;
-  /** 方向的代表词与近三年占比 */
+  /** 方向的代表词与样本内近三年占比 */
   clusterInfo: (
     id: number,
   ) => { terms: string[]; recentShare: number; crowding: number } | undefined;
@@ -50,10 +50,17 @@ const WEIGHTS: Record<ScoreDimensionKey, number> = {
   问题匹配度: 30,
   方法相关度: 20,
   证据完整度: 15,
-  可复现程度: 15,
+  复现线索: 15,
   时效与趋势价值: 10,
   用户约束适配: 10,
 };
+
+/**
+ * 「复现线索」未经人工核验时的得分封顶。
+ * scoring 是纯函数，拿不到证据库的人工核验结果，
+ * 因此线索类加分一律按未核验口径封顶，不代表论文可复现。
+ */
+const REPRO_UNVERIFIED_CAP = 8;
 
 const STOP_TERMS = new Set([
   "the",
@@ -127,19 +134,38 @@ export function scorePaper(paper: Paper, ctx: ScoreContext): ScoreBreakdown[] {
   if (paper.keywords.length > 0) evidenceScore += 2;
   if (paper.oaUrl) evidenceScore += 1;
 
-  // 4. 可复现程度：有开放获取或明确的代码/数据线索才算高，否则标记为需要自行重建
-  const hasCodeHint = /github|code|repository|source code|implement/i.test(text);
-  const hasDataHint = /dataset|benchmark|data set/i.test(text);
-  let reproScore = 4;
-  if (paper.oaUrl) reproScore += 5;
-  if (hasCodeHint) reproScore += 5;
-  if (hasDataHint) reproScore += 4;
-  reproScore = Math.min(15, reproScore);
-  const reproReason = !paper.oaUrl && !hasCodeHint && !hasDataHint
-    ? "没有开放获取入口，也没有代码或数据线索，复现需要自行重建。"
-    : paper.oaUrl
-      ? "有开放获取入口，可以先读全文再评估复现成本。"
-      : "材料里出现了代码或数据线索，但仍需人工核验链接是否可用。";
+  // 4. 复现线索：只按「线索是否存在」给有限分，不评价真实可复现性。
+  //    代码/权重/数据/划分/配置都只是文本线索，未经人工核验一律封顶 REPRO_UNVERIFIED_CAP。
+  const hasCodeHint =
+    /github|gitlab|source code|code availability|code (?:is |will be )?(?:available|released)|repository|开源代码|代码开源/i.test(text);
+  const hasWeightHint =
+    /pre-?trained (?:model|weight)|checkpoint|model weights|预训练权重|模型权重/i.test(text);
+  const hasDataHint =
+    /dataset|benchmark|data set|data availability|数据集/i.test(text);
+  const hasSplitHint =
+    /data split|train[\/-]test|training[\/-]test|train[\/-]val|数据划分|训练集.{0,8}测试集/i.test(text);
+  const hasConfigHint =
+    /hyper-?parameter|implementation detail|training detail|config(?:uration)? file|超参|训练配置|实验配置/i.test(text);
+  let reproScore = 0;
+  if (hasCodeHint) reproScore += 2;
+  if (hasDataHint) reproScore += 2;
+  if (hasWeightHint) reproScore += 1;
+  if (hasSplitHint) reproScore += 1;
+  if (hasConfigHint) reproScore += 1;
+  // 已验证 OA 全文只是便于人工核验线索，本身不是复现保证
+  if (paper.oaUrl) reproScore += 1;
+  reproScore = Math.min(REPRO_UNVERIFIED_CAP, reproScore);
+  const clueState = (present: boolean) => (present ? "有(未核验)" : "未提及");
+  const reproReason =
+    [
+      paper.oaUrl ? "开放全文:已验证" : "开放全文:无(可能仅有出版商落地页)",
+      `代码链接:${clueState(hasCodeHint)}`,
+      `权重:${clueState(hasWeightHint)}`,
+      `数据:${clueState(hasDataHint)}`,
+      `划分:${clueState(hasSplitHint)}`,
+      `配置:${clueState(hasConfigHint)}`,
+    ].join("；") +
+    `。线索未核验，不代表可复现（未经人工核验封顶 ${REPRO_UNVERIFIED_CAP}/15）。`;
 
   // 5. 时效与趋势价值：只看年份和方向趋势，引用数不计入这一项
   const age = Math.max(0, ctx.maxYear - paper.year);
@@ -163,7 +189,7 @@ export function scorePaper(paper: Paper, ctx: ScoreContext): ScoreBreakdown[] {
     fitReason = hasDataHint
       ? "材料里出现了数据集相关描述，但仍要确认能否公开下载。"
       : paper.oaUrl
-        ? "有开放获取入口，但材料里没有明确的数据集线索。"
+        ? "有已验证开放全文，但材料里没有明确的数据集线索。"
         : "材料里没有数据线索，可能无法拿到公开数据。";
   }
 
@@ -198,12 +224,12 @@ export function scorePaper(paper: Paper, ctx: ScoreContext): ScoreBreakdown[] {
         paper.abstract ? "有摘要" : "只有元数据，没有摘要",
         paper.topics.length > 0 ? "有主题标签" : "没有主题标签",
         paper.keywords.length > 0 ? "有关键词" : "没有关键词",
-        paper.oaUrl ? "有开放获取入口" : "没有开放获取入口",
+        paper.oaUrl ? "有已验证开放全文" : "无已验证开放全文",
       ].join("，"),
       evidenceIds: [`paper:${paper.id}:materials`],
     },
     {
-      dimension: "可复现程度",
+      dimension: "复现线索",
       score: reproScore,
       max: 15,
       reason: reproReason,
@@ -213,7 +239,7 @@ export function scorePaper(paper: Paper, ctx: ScoreContext): ScoreBreakdown[] {
       dimension: "时效与趋势价值",
       score: trendScore,
       max: 10,
-      reason: `发表于 ${paper.year} 年；所属方向近三年占比 ${Math.round((cluster?.recentShare ?? 0) * 100)}%。引用次数只作背景信号，不计入这一项。`,
+      reason: `发表于 ${paper.year} 年；所属方向样本内近三年占比 ${Math.round((cluster?.recentShare ?? 0) * 100)}%（样本内口径，不代表真实发文增长）。引用次数只作背景信号，不计入这一项。`,
       evidenceIds: clusterId === undefined ? [`paper:${paper.id}:year`] : [`paper:${paper.id}:year`, `cluster:${clusterId}:recentShare`],
     },
     {

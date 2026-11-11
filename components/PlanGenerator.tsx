@@ -23,6 +23,8 @@ import {
 import type { SearchReport } from "@/lib/data/types";
 import { downloadText, researchPlanToMarkdown } from "@/lib/export";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
+import { AiServiceNotice } from "@/components/AiServiceNotice";
+import { EVIDENCE_FIELDS, type EvidenceNote } from "@/hooks/useEvidenceStore";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "方案生成暂时不可用：服务端还没有配置模型接口的 key。",
@@ -55,6 +57,12 @@ const CONSTRAINT_FIELDS: {
 interface Props {
   context: DirectionContext | null;
   report: SearchReport | null;
+  /** 证据卡标注，用于把用户已核对的内容送进模型上下文 */
+  evidenceNotes?: Record<string, EvidenceNote>;
+  /** 当前论文，用于给已核对证据标注标题 */
+  papers?: import("@/lib/data/types").Paper[];
+  /** 从研究档案载入的方案（完整恢复） */
+  restoredPlan?: { plan: ResearchPlan; markdown: string } | null;
   /** 把最新的方案交给上层，便于存进研究档案 */
   onPlanChange?: (plan: ResearchPlan | null, markdown: string) => void;
 }
@@ -77,22 +85,82 @@ const EMPTY_RESOURCE: ResourceDraft = {
   accessCondition: "",
 };
 
-export function PlanGenerator({ context, report, onPlanChange }: Props) {
+/** 用户已核对、将被送进模型上下文的证据字段。 */
+interface VerifiedEvidence {
+  paperId: string;
+  paperTitle: string;
+  fields: { key: string; label: string; value: string; location?: string; verifiedAt?: string }[];
+}
+
+function fingerprint(input: unknown): string {
+  return JSON.stringify(input);
+}
+
+export function PlanGenerator({ context, report, evidenceNotes, papers, restoredPlan, onPlanChange }: Props) {
   const available = useFunctionProbe();
   const [constraints, setConstraints] = useState<Record<string, string>>({});
   const [resources, setResources] = useState<ResourceDraft[]>([]);
-  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">(
+    restoredPlan ? "ready" : "idle",
+  );
   const [error, setError] = useState<string | null>(null);
-  const [plan, setPlan] = useState<ReturnType<typeof parsePlan>>(null);
+  const [plan, setPlan] = useState<ReturnType<typeof parsePlan>>(restoredPlan?.plan ?? null);
   const [model, setModel] = useState<string | null>(null);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  // 生成时冻结的输入与导出文本：导出/展示都用冻结版本，避免旧方案被挂到新上下文上
+  const [frozen, setFrozen] = useState<null | {
+    context: DirectionContext | null;
+    report: SearchReport | null;
+    constraints: Record<string, string>;
+    resources: ResourceDraft[];
+    verified: VerifiedEvidence[];
+  }>(null);
+  const [storedMarkdown, setStoredMarkdown] = useState<string | null>(restoredPlan?.markdown ?? null);
+  const [excludedPapers, setExcludedPapers] = useState<string[]>([]);
+
+  const verifiedAll = useMemo<VerifiedEvidence[]>(() => {
+    const titleOf = new Map((papers ?? []).map((p) => [p.id, p.title]));
+    const out: VerifiedEvidence[] = [];
+    for (const note of Object.values(evidenceNotes ?? {})) {
+      const fields = (note.verifiedFields ?? [])
+        .map((key) => {
+          const meta = EVIDENCE_FIELDS.find((f) => f.key === key);
+          const value = note.fields?.[key];
+          if (!meta || !value?.trim()) return null;
+          return {
+            key,
+            label: meta.label,
+            value: value.trim(),
+            location: note.fieldMeta?.[key]?.location,
+            verifiedAt: note.fieldMeta?.[key]?.verifiedAt,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+      if (fields.length > 0) {
+        out.push({ paperId: note.paperId, paperTitle: titleOf.get(note.paperId) ?? note.paperId, fields });
+      }
+    }
+    return out;
+  }, [evidenceNotes, papers]);
+
+  const verified = useMemo(
+    () => verifiedAll.filter((item) => !excludedPapers.includes(item.paperId)),
+    [verifiedAll, excludedPapers],
+  );
 
   const resolved = useMemo(() => {
     if (!plan) return { items: [], unknown: [] };
-    return resolvePlanEvidence(plan.evidenceIds, context?.evidence ?? []);
-  }, [plan, context]);
+    return resolvePlanEvidence(plan.evidenceIds, (frozen?.context ?? context)?.evidence ?? []);
+  }, [plan, context, frozen]);
 
-  if (available !== true) return null;
+  const stale =
+    frozen !== null &&
+    fingerprint({ context, report, constraints, resources, verified }) !==
+      fingerprint(frozen);
+
+  if (available !== "ready") {
+    return <AiServiceNotice status={available} feature="研究方案生成" />;
+  }
 
   const updateResource = (index: number, patch: Partial<ResourceDraft>) => {
     setResources((prev) =>
@@ -104,22 +172,26 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
     if (!context) return;
     setStatus("loading");
     setError(null);
+    const inputConstraints = Object.fromEntries(
+      Object.entries(constraints).filter(([, value]) => value.trim()),
+    );
+    const inputResources = resources
+      .filter((item) => item.name.trim())
+      .map((item) => ({
+        kind: item.kind,
+        name: item.name.trim(),
+        status: item.status,
+        url: item.url.trim() || undefined,
+        license: item.license.trim() || undefined,
+        accessCondition: item.accessCondition.trim() || undefined,
+      }));
+    const snapshot = { context, report, constraints: inputConstraints, resources, verified };
     try {
       const payload = {
         context,
-        constraints: Object.fromEntries(
-          Object.entries(constraints).filter(([, value]) => value.trim()),
-        ),
-        resources: resources
-          .filter((item) => item.name.trim())
-          .map((item) => ({
-            kind: item.kind,
-            name: item.name.trim(),
-            status: item.status,
-            url: item.url.trim() || undefined,
-            license: item.license.trim() || undefined,
-            accessCondition: item.accessCondition.trim() || undefined,
-          })),
+        constraints: inputConstraints,
+        resources: inputResources,
+        verifiedEvidence: verified,
       };
       const raw = await requestJson(
         "/functions/v1/app/plan",
@@ -135,11 +207,18 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
       if (!parsed) {
         throw new ApiError("模型没有给出可用格式的方案，请再试一次。", "empty_output");
       }
+      const md = buildMarkdown(parsed, {
+        model: body.model,
+        generatedAt: body.generatedAt,
+        snapshot,
+      });
       setPlan(parsed);
       setModel(typeof body.model === "string" ? body.model : null);
       setGeneratedAt(typeof body.generatedAt === "string" ? body.generatedAt : null);
+      setFrozen(snapshot);
+      setStoredMarkdown(md);
       setStatus("ready");
-      onPlanChange?.(parsed, buildMarkdown(parsed, { model: body.model, generatedAt: body.generatedAt }));
+      onPlanChange?.(parsed, md);
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "生成失败，请稍后再试。");
       setStatus("error");
@@ -148,22 +227,30 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
 
   const buildMarkdown = (
     target: NonNullable<typeof plan>,
-    meta: { model?: string | null; generatedAt?: string | null },
+    meta: {
+      model?: string | null;
+      generatedAt?: string | null;
+      snapshot?: NonNullable<typeof frozen>;
+    },
   ): string => {
-    const resolvedItems = resolvePlanEvidence(target.evidenceIds, context?.evidence ?? []);
+    const src = meta.snapshot ?? frozen;
+    const useConstraints = src?.constraints ?? constraints;
+    const useResources = (src?.resources ?? resources)
+      .filter((item) => item.name.trim())
+      .map((item) => ({
+        kind: item.kind,
+        name: item.name.trim(),
+        status: item.status,
+        url: item.url.trim() || undefined,
+        license: item.license.trim() || undefined,
+        accessCondition: item.accessCondition.trim() || undefined,
+      }));
+    const useVerified = src?.verified ?? verified;
+    const resolvedItems = resolvePlanEvidence(target.evidenceIds, (src?.context ?? context)?.evidence ?? []);
     return researchPlanToMarkdown(target, {
-      report,
-      constraints,
-      resources: resources
-        .filter((item) => item.name.trim())
-        .map((item) => ({
-          kind: item.kind,
-          name: item.name.trim(),
-          status: item.status,
-          url: item.url.trim() || undefined,
-          license: item.license.trim() || undefined,
-          accessCondition: item.accessCondition.trim() || undefined,
-        })),
+      report: src?.report ?? report,
+      constraints: useConstraints,
+      resources: useResources,
       evidence: resolvedItems.items.map((item) => ({
         id: item.id,
         label: item.label,
@@ -171,19 +258,16 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
         origin: item.origin,
       })),
       unknownEvidence: resolvedItems.unknown,
+      verifiedEvidence: useVerified,
       generatedAt: meta.generatedAt ?? undefined,
       model: meta.model ?? undefined,
     });
   };
 
   const exportPlan = () => {
-    if (!plan) return;
+    if (!plan || !storedMarkdown) return;
     const stamp = new Date().toISOString().slice(0, 10);
-    downloadText(
-      `topicscope-plan-${stamp}.md`,
-      buildMarkdown(plan, { model, generatedAt }),
-      "text/markdown",
-    );
+    downloadText(`topicscope-plan-${stamp}.md`, storedMarkdown, "text/markdown");
   };
 
   return (
@@ -319,6 +403,46 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
             </div>
           </div>
 
+          <div className="space-y-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <p className="label-caps">已核对证据（会随约束一起提交给模型）</p>
+            {verifiedAll.length === 0 ? (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                还没有任何已核对的证据字段。到「文献库 → 证据卡」逐字段填写并标记已核对后，这里会列出可提交的内容；
+                模型将能引用你核对过的论文内容，而不只是聚类统计。
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {verifiedAll.map((item) => {
+                  const included = !excludedPapers.includes(item.paperId);
+                  return (
+                    <label key={item.paperId} className="flex items-start gap-2 text-[11px] leading-relaxed">
+                      <input
+                        type="checkbox"
+                        checked={included}
+                        onChange={() =>
+                          setExcludedPapers((prev) =>
+                            included ? [...prev, item.paperId] : prev.filter((id) => id !== item.paperId),
+                          )
+                        }
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="font-medium">{item.paperTitle}</span>
+                        <span className="text-muted-foreground">
+                          {" "}· {item.fields.map((f) => f.label).join(" / ")}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              本次提交 {verified.length} 篇 / {verified.reduce((n, v) => n + v.fields.length, 0)} 个已核对字段。
+              未勾选的不会发送。模型看到的是这些人工核对内容 + 聚类统计 + 论文标题/摘要节选。
+            </p>
+          </div>
+
           <div className="flex flex-wrap items-center gap-3">
             <Button
               size="sm"
@@ -346,6 +470,19 @@ export function PlanGenerator({ context, report, onPlanChange }: Props) {
           ) : null}
         </CardContent>
       </Card>
+
+      {plan && stale ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          依据已变化（检索 / 约束 / 资源 / 已核对证据与生成时不一致）。下面显示的是上次生成的方案，
+          导出仍用生成时的冻结内容；请重新生成以匹配当前研究现场。
+        </div>
+      ) : null}
+
+      {plan && !frozen && restoredPlan ? (
+        <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          此方案载入自研究档案，导出使用存档时的方案内容。若当前检索或约束已变化，请重新生成。
+        </div>
+      ) : null}
 
       {status === "ready" && plan ? (
         <div className="space-y-4">

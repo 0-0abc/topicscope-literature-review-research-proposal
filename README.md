@@ -1,64 +1,116 @@
-# Qoder Sites React starter
+# TopicScope · 选题雷达
 
-A React, TypeScript, Vite and Tailwind frontend with a bundled Shadcn component catalog. Vite produces static files in `dist/`. Server behavior belongs in the optional Qoder Sites Function, not a Node or framework server.
+给正在读文献、写综述的学生和科研新人的**纯前端科研选题工作台**：看清一个方向已经被做透到什么程度，把口径不一的指标换算成可比的数字，并把判断整理成可回查的综述、选题体检与研究方案。
 
-## Develop
+- 公网地址：<https://topicscope-piwbj3lryn1.qoder.zone>
+- 2026 Qoder 高校创造力大赛 · StudyHack 学习科研赛道参赛作品（[作品帖](https://tianchi.aliyun.com/forum/post/1094982)）
+- 技术栈：React 19 + TypeScript + Vite 8 + Tailwind CSS 4（shadcn/ui 组件目录），部署于 Qoder Sites（SPA + Edge Function）
 
-Use a Node version accepted by `package.json` (`^22.13.0 || >=24.0.0`). Select an installed compatible runtime and keep it selected for installation, development and build:
+## 功能页签
+
+| 页签 | 做什么 |
+| --- | --- |
+| 方向雷达 | 文献聚类 + 五档覆盖判定（每条判定附「不能推出什么」）、按年趋势、关键词共现图、导师汇报（规则生成）、AI 方向建议（证据 ID 可回查） |
+| 指标口径对齐 | 分类 / 分割 / 排序检索 / 回归四类任务、26 个指标的公式与误读提示、口径换算台（换不了的明确说换不了）、内置 50 项自检面板 |
+| 文献库 | 按方向筛选、排序、六维候选评分、证据等级标注、论文证据卡（逐字段人工核对）、导出 Markdown / CSV |
+| 文献综述 | 基于当前样本生成综述草稿，[n] 引用对应 GB/T 7714 参考文献，本地质量门禁（引用 / 交织 / 分寸）+ 自我对抗检查 |
+| 选题体检 | 致命缺陷审计 → 生命周期匹配 → 五维评分 → 范式探测 → 风险 → 三档结论，前端完整性自检防止结论与分数自相矛盾 |
+| 研究方案 | 按用户约束生成 15 节方案 + 五项评分 + 逻辑链自洽检查，资源可得性登记，导出 Markdown |
+| 研究档案 | 会话存档（IndexedDB）：保存 / 载入 / 合并 / 导入导出，断网可重看 |
+
+当前为七个平铺页签，导航仍在收敛中，结构可能继续合并调整。
+
+## 架构
+
+数据流：检索（`lib/data`）→ 本地分析（`lib/analysis`）→ 指标换算（`lib/metrics`）→ AI 生成（`lib/ai` + 同源 Function）→ 存档（`hooks`）。
+
+- **`src/`**：入口。`main.tsx`、`App.tsx`（页签编排与全局状态接线）、`globals.css`。路径别名 `@` 指向项目根目录，`components/`、`hooks/`、`lib/` 都在根下。
+- **`components/`**：UI 层。各页签视图（RadarView / AlignView / LibraryView / ReviewGenerator / FeasibilityChecker / PlanGenerator / SessionArchive 等）、证据卡与共现图，`ui/` 为 shadcn 基础组件。
+- **`hooks/`**：状态层。`useCorpus`（检索 + 分析流水线）、`useEvidenceStore`（证据标注，localStorage）、`useSessionStore`（研究档案，IndexedDB）、`useScoreContext`（评分拆解）、`useFunctionProbe`（AI 服务状态探测）。
+- **`lib/data/`**：检索适配。`retrieval.ts` 主流程为 本地缓存（同一检索词 12 小时）→ OpenAlex 主源 → Crossref 降级（无主题标签、判定偏粗，界面明示）；另有去重、DOI 归一、离线快照加载与类型。
+- **`lib/analysis/`**：分词 → TF-IDF → 球面 k-means（固定种子可复现）→ `radar.ts` 聚类与覆盖判定；`cooccurrence.ts` 共现图（lift 筛选）；`scoring.ts` 六维评分；`advisorReport.ts` 规则生成的导师汇报。
+- **`lib/metrics/`**：26 个指标的实现与口径注册表、换算规则与「不可互推」清单；`selfcheck.ts` 50 个自检用例，期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，不共用代码路径。
+- **`lib/ai/`**：四个生成器 `directions` / `review` / `feasibility` / `plan`。负责构造发送载荷（统计数字 + 证据 ID 白名单 + 编号文献）、客户端解析与校验（`parseSuggestions` / `parseReview` / `parseFeasibility` / `parsePlan`）、证据回查、综述质量门禁、体检完整性自检与 Markdown 导出。
+- **`functions/handler.ts`**：站点唯一后端（Deno Edge Function，`index.ts` 为部署入口）。动作白名单：`directions` / `plan` / `review` / `feasibility` / `status`（GET 探测配置与上游鉴权状态）。模型 key 只从服务端环境变量读取；输入做形状校验、证据 ID 白名单过滤，同 IP 限流 20 次 / 10 分钟，请求体上限 96 KB，上游超时 60 秒。
+
+## 数据与隐私
+
+- **分析全部在浏览器本地**：聚类、覆盖判定、共现、评分、指标换算不上传任何文献内容。
+- **在线检索**只把检索词发往 OpenAlex / Crossref；命中本地缓存时不发请求。
+- **AI 生成**（方向建议 / 综述 / 体检 / 方案）把统计数字、论文标题与摘要节选、以及你勾选的已核对证据，经同源 Function 发送到站点自带的模型服务；模型 key 不在前端。
+- **本机存储**：研究档案存 IndexedDB（`topicscope`），证据标注、检索缓存、可选 OpenAlex key 存 localStorage。
+- 服务端 Secret 不进入站点代码、构建产物或任何响应。
+
+## 配置
+
+| 配置 | 位置 | 说明 |
+| --- | --- | --- |
+| `QWEN_API_KEY` | 服务端 Secret，在 Qoder Sites 站点设置里填写 | AI 功能必需。未配置时前端按 `status` 探测显示原因，本地功能照常可用 |
+| `QWEN_MODEL` | 服务端环境变量，可选 | 默认 `qwen3.8-flash` |
+| `QWEN_BASE_URL` | 服务端环境变量，可选 | 缺省按一组可信的千问兼容地址依次尝试 |
+| OpenAlex API key | 页面「设置」里填写，只存本机 localStorage | 可选。不填也能检索（免费额度按 IP 计，较小）；额度受限时自动降级 Crossref |
+
+## 本地运行
+
+Node 版本要求 `^22.13.0 || >=24.0.0`。
 
 ```sh
-npm ci
-npm run dev
+npm install
+npm run dev        # Vite 开发服务器（127.0.0.1）
+npm run build      # tsc --noEmit + scripts/build.mjs（强制 production 的 Vite 构建）→ dist/
+npm run preview    # 本地预览构建产物
 ```
 
-Use the loopback URL printed by Vite. Edit `src/App.tsx`, `src/globals.css` and the title/description in `index.html`. Replace the sample page with the requested product before presenting a first meaningful preview. Import existing UI primitives from `@/components/ui/<component>` and compose them for the site's design. The neutral starter theme is a starting point, not the finished visual direction.
-
-For production output:
+AI 功能的本地联调需要 [Deno](https://deno.com)：
 
 ```sh
-npm run build
-npm run preview
+npm run dev:function    # deno run --allow-net=127.0.0.1:8000 dev/function-local.ts
+npm run check:function  # deno check functions/index.ts
 ```
 
-The build fixes `NODE_ENV=production` before loading Vite, independently of the terminal environment. It checks the frontend and bundled component types and emits `dist/index.html` and assets. `npm run preview` serves this output locally. Reuse passing checks while source is unchanged; no additional unit-test suite or browser QA is required by the template.
+本地 Function 监听 `127.0.0.1:8000`，Vite dev / preview 已把 `/functions/v1/app` 代理过去。没有 Deno 时前端照常开发构建，AI 面板按探测结果降级为说明文案，检索、雷达、指标、文献库、档案不受影响。
 
-## Optional Function
-
-The default page is entirely static and does not call a Function. For server behavior, adapt the public, credential-free example in `functions/handler.ts`. `functions/index.ts` is the Deno deployment entry point. Check `deno --version` before using a separate terminal for:
+## 测试与自检
 
 ```sh
-npm run check:function
-npm run dev:function
+node_modules/.bin/jiti dev/run-selfcheck.ts   # 指标自检，输出「自检 50/50 通过」，失败时退出码非 0
+node_modules/.bin/jiti dev/run-analysis.ts    # 在离线快照上跑聚类与共现的冒烟检查
 ```
 
-If Deno is unavailable, the static frontend can still build and run. Keep Function validation pending until Deno or an equivalent existing Function checker is available; `npm run build` checks the frontend only. Local proxy requests also need a running compatible Function server.
+- 自检期望值来自 `dev/selfcheck_reference.py` 的独立实现（只共享数学定义），页面「指标口径对齐」里也内置同一份自检面板。
+- `dev/fetch-snapshot.ts` 用于重抓离线快照（需环境变量 `OPENALEX_API_KEY`，产物不含 key）。
 
-The local service binds to `127.0.0.1:8000`; Vite development and built preview proxy `/functions/v1/app` to it, preserving the path. Probe with an available HTTP tool or Node `fetch`; with `curl` installed, for example:
+## 部署（Qoder Sites）
 
-```sh
-curl --fail 'http://127.0.0.1:5173/functions/v1/app?name=Visitor'
+1. `npm run build` 产出 `dist/`。
+2. 通过 Sites 工具 prepare：`webDirectory: "dist"`、`spa: true`、`functionDirectory: "functions"`。
+3. publish 发布，并在站点设置里填入服务端 Secret `QWEN_API_KEY`；访问权限设为任何人可访问。
+
+`.gitignore` 已忽略 `dist/`、`.env*`、`.qoder-sites/`、`.tmp/` 等，密钥与产物不入库。
+
+## 目录结构
+
+```
+├── src/                  # 入口：main.tsx / App.tsx / globals.css
+├── components/           # 页签视图与 ui/ 基础组件
+├── hooks/                # 语料、证据、档案、评分、服务探测等状态
+├── lib/
+│   ├── data/             # OpenAlex / Crossref 适配、缓存、去重、快照
+│   ├── analysis/         # 分词、TF-IDF、k-means、判定、共现、评分
+│   ├── metrics/          # 26 指标、换算注册表、50 项自检
+│   ├── ai/               # 四个生成器的载荷、解析校验与导出
+│   └── api.ts 等         # 同源 Function 调用封装与工具
+├── functions/            # Edge Function：handler.ts + index.ts（Deno）
+├── dev/                  # 本地脚本：自检、分析冒烟、快照抓取、Function 联调
+├── scripts/              # check-node.mjs / build.mjs
+├── public/data/          # 离线快照（540 篇真实论文，2018–2026 按年采样）
+├── docs/                 # 作品帖文案与设计稿
+└── vendor/               # 上游 shadcn CSS 及其许可证
 ```
 
-Use Vite's actual port if it differs. The same frontend request after deployment is routed by Qoder Sites. Local proxy configuration is not production routing. Keep local-only servers and fixtures in `dev/`, outside both publication directories. The included Function has no dependencies; add self-contained runtime imports as required. Frontend npm dependencies are not automatically installed in Functions.
+## 许可与署名
 
-## Publish with Qoder Sites
-
-Open a local conversation in this project and follow the `sites-hosting` skill. Workspace registration is optional. Use the directory returned by `get_context` with:
-
-- `webDirectory: "dist"` after the build.
-- `spa: false` for the default single page; use `true` when adding client-side deep routes that need fallback.
-- `functionDirectory: "functions"` only if the application uses the Function. Omit it for static-only delivery.
-
-The Sites tools prepare artifacts and generate the publication descriptor; publish completed hosted work by default, unless the user explicitly requests a preview first or defers publication. Do not upload the project root, `node_modules`, `dev`, or source as the web artifact. A successful build or release does not prove an external integration works.
-
-For a new database-backed React page, follow the installed `sites-building` Skill's `references/function-backend.md`. Its assembled `assets/function-backend/` example includes `Notes.tsx`, Function routes and a schema using the platform's private database credentials. For a runnable records-and-attachments workbench, use that Skill's `references/records-example.md`; its setup command assembles a new project from this starter and keeps local fixtures outside deployment outputs. Preserve and adapt its application identity and ownership checks before exposing private records. `references/database.md`, `assets/database-react/App.tsx` and `assets/database-function/` are for existing legacy allocations only. These optional assets stay in the Skill rather than being copied into every static project.
-
-For database or Storage, follow the corresponding `sites-building` references and `sites-management` capability workflow. For AI, follow `sites-build-agent-app` and keep Cloud Agents access in the Function. Application credentials belong in server-side Sites Settings; frontend environment variables are public. This starter does not implement visitor login, database permissions, Cloud resource coordination or QCA sessions; add those only for the requested feature using the existing skills.
-
-See `PROVENANCE.md` and `vendor/` for source attribution and the preserved stylesheet license.
-
-After copying the starter, rename `gitignore.template` to `.gitignore` before installing dependencies. This keeps the file available in npm and bundled CLI resources.
-
-## Design workbench
-
-On Desktop, call `open_design_workbench` with the project name and design registration (pages and implemented Nudge capabilities). The tool creates the single `.站点名称.qoder.site` entry; update it through `update_design_workbench`. The starter deliberately contains no fixed-name project entry. Components consume `--site-*` variables defined in the existing application stylesheet. The workbench only previews temporary overrides and attaches requested changes to chat. The Agent implements changes and prepares publication artifacts before reporting completion; no dedicated theme file is required.
+- 选题体检框架、综述写作纪律、方案逻辑链检查、审稿人速查改编自 [HKUSTDial/Supervisor-Skills](https://github.com/HKUSTDial/Supervisor-Skills)（**CC-BY-4.0**），界面与导出 Markdown 中均保留署名；改编做了简化，不等同于原项目的完整评估。
+- UI 基础来自 Qoder Sites React starter，见 `PROVENANCE.md`；`vendor/` 保留上游样式许可证。
+- 书目数据来自 OpenAlex / Crossref 开放接口，标题与摘要版权归原作者所有。
+- 覆盖判定、评分权重与体检结论均为启发式线索，不是同行评议结论；边界说明见站点页脚与作品帖。

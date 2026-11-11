@@ -18,7 +18,10 @@ interface OpenAlexWork {
   type: string | null;
   topics: { display_name: string }[] | null;
   keywords: { display_name: string }[] | null;
-  primary_location: { source: { display_name: string } | null } | null;
+  primary_location: {
+    source: { display_name: string } | null;
+    landing_page_url?: string | null;
+  } | null;
   abstract_inverted_index: Record<string, number[]> | null;
   authorships: { author: { display_name: string } }[] | null;
   open_access: { oa_url: string | null } | null;
@@ -74,6 +77,22 @@ function rebuildAbstract(index: Record<string, number[]> | null): string | null 
 function toPaper(work: OpenAlexWork, ctx: ProvenanceContext): Paper {
   const doi = normalizeDoi(work.doi);
   const sourceId = work.id.replace(/^https?:\/\/openalex\.org\//, "");
+  // best_oa_location 与 open_access.oa_url 都是 OpenAlex 标注的 OA 位置，
+  // 本身即开放获取，可视为已验证 OA 全文入口。
+  const oaUrl =
+    work.best_oa_location?.pdf_url ??
+    work.best_oa_location?.landing_page_url ??
+    work.open_access?.oa_url ??
+    null;
+  // 出版商落地页单独存放，不计入开放获取统计。
+  const publisherUrl =
+    work.primary_location?.landing_page_url ??
+    (doi ? `https://doi.org/${doi}` : null);
+  const oaStatus: Paper["oaStatus"] = oaUrl
+    ? "verified"
+    : publisherUrl
+      ? "publisher_only"
+      : "none";
   return {
     id: work.id,
     doi,
@@ -87,11 +106,9 @@ function toPaper(work: OpenAlexWork, ctx: ProvenanceContext): Paper {
     abstract: rebuildAbstract(work.abstract_inverted_index),
     authors: (work.authorships ?? []).slice(0, 6).map((a) => a.author.display_name),
     authorCount: (work.authorships ?? []).length,
-    oaUrl:
-      work.best_oa_location?.pdf_url ??
-      work.best_oa_location?.landing_page_url ??
-      work.open_access?.oa_url ??
-      null,
+    oaUrl,
+    publisherUrl,
+    oaStatus,
     provenance: {
       source: "openalex",
       sourceId,
@@ -100,11 +117,7 @@ function toPaper(work: OpenAlexWork, ctx: ProvenanceContext): Paper {
       filter: ctx.filter,
       dedupKey: doi ? `doi:${doi}` : `id:openalex:${sourceId}`,
       abstractAvailable: Boolean(work.abstract_inverted_index),
-      oaUrl:
-        work.best_oa_location?.pdf_url ??
-        work.best_oa_location?.landing_page_url ??
-        work.open_access?.oa_url ??
-        null,
+      oaUrl,
     },
   };
 }

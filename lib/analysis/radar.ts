@@ -19,16 +19,16 @@ export const VERDICT_META: Record<
   mature: {
     label: "稳定产出方向",
     tone: "text-foreground",
-    summary: "有持续研究，但仍可能通过数据、任务设定或评测设计形成差异。",
+    summary: "样本内有持续研究，但仍可能通过数据、任务设定或评测设计形成差异。",
     cannotConclude:
       "不能据此断定这个方向缺少研究空间：占比高可能来自检索式的偏好，而不是领域真实密度。",
   },
   emerging: {
     label: "增长窗口",
     tone: "text-foreground",
-    summary: "当前样本量不大，但近年增长明显，值得进一步核查。",
+    summary: "当前检索样本量不大，但样本内近期占比高，值得进一步核查。",
     cannotConclude:
-      "不能据此断定这个方向尚未被其他数据库或未公开论文覆盖；也不能断定增长会持续。",
+      "样本内近期占比高，固定按年采样的样本不能证明真实发文增长；也不能断定这个方向尚未被其他数据库或未公开论文覆盖，增长是否持续需独立检索验证。",
   },
   gap: {
     label: "当前检索未观察到",
@@ -55,8 +55,9 @@ export interface TopicCluster {
   sizeShare: number;
   yearRange: [number, number];
   medianYear: number;
+  /** 样本内近三年论文比例（固定按年采样的口径，不能证明真实发文增长） */
   recentShare: number;
-  /** 近五年论文比例 */
+  /** 样本内近五年论文比例 */
   fiveYearShare: number;
   citationTotal: number;
   citationMedian: number;
@@ -79,7 +80,7 @@ export interface TopicCluster {
   }[];
   /** 该方向内摘要覆盖率（%） */
   abstractCoverage: number;
-  /** 该方向内开放获取覆盖率（%） */
+  /** 该方向内已验证开放获取覆盖率（%，只计已验证 OA 全文，不含出版商落地页） */
   oaCoverage: number;
   /** 按年发文量（当前样本，覆盖全局年份区间） */
   yearCounts: { year: number; count: number }[];
@@ -212,19 +213,19 @@ export function analyzeTopics(papers: Paper[]): RadarResult {
     let verdictReason: string;
     if (size <= 3) {
       verdict = "gap";
-      verdictReason = `整个检索范围内只有 ${size} 篇命中，属于当前检索未观察到；要么是真空白，要么是检索式没覆盖到。`;
+      verdictReason = `当前检索样本内只有 ${size} 篇命中，属于当前检索样本未观察到；可能是真实空白，也可能是检索式没覆盖到，需独立检索验证。`;
     } else if (sizeShare < 0.1 && recentShare >= 0.6) {
       verdict = "emerging";
-      verdictReason = `占比 ${(sizeShare * 100).toFixed(1)}%，但 ${(recentShare * 100).toFixed(0)}% 的论文集中在 ${recentThreshold}–${maxYear} 年，是刚冒头、还没拥挤的窗口。`;
+      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%，且样本内 ${(recentShare * 100).toFixed(0)}% 的论文集中在 ${recentThreshold}–${maxYear} 年；样本内近期占比高，固定按年采样的样本不能证明真实发文增长，需独立检索验证。`;
     } else if (sizeShare >= 0.12 && medianYear <= maxYear - 4 && recentShare <= 0.35) {
       verdict = "saturated";
-      verdictReason = `占比 ${(sizeShare * 100).toFixed(1)}%、中位发表年份 ${medianYear}，早期已被大量工作覆盖，${recentThreshold} 年后新增很少。`;
+      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%、中位发表年份 ${medianYear}，样本内早期工作较多，${recentThreshold} 年后新增很少。`;
     } else if (sizeShare < 0.05) {
       verdict = "mature";
-      verdictReason = `占比仅 ${(sizeShare * 100).toFixed(1)}%、共 ${size} 篇，是一个被忽视的细分问题，不是空白但也谈不上热门。`;
+      verdictReason = `样本内占比仅 ${(sizeShare * 100).toFixed(1)}%、共 ${size} 篇，当前检索样本未观察到密集工作；样本内占比低不等于真实领域冷门。`;
     } else {
       verdict = "mature";
-      verdictReason = `占比 ${(sizeShare * 100).toFixed(1)}%，中位发表年份 ${medianYear}，属于有稳定产出的常规方向。`;
+      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%，中位发表年份 ${medianYear}，样本内属于有稳定产出的常规方向。`;
     }
 
     const topPapers = [...members]

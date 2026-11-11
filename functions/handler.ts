@@ -44,6 +44,7 @@ const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读�
 5. 失败判据必须写清楚：什么结果算假设不成立。
 6. 每个 section 控制在 150 字以内，要点式，不要写长段落；不要重复同一句话。
 7. 逻辑链自洽：已有工作的局限 → 核心想法 → 挑战 → 方法 → 预期结果必须逐级互锁。每个挑战要有对应方法，每个预期结果要有方法或实验支撑，贡献不超过三条且都能落到具体章节；按这四步做自洽检查，发现断链就写明断在哪一环、怎么修，写进 chainAudit。
+8. 若输入带 verifiedEvidence（用户逐字段人工核对过的论文内容），优先采信它而不是你的推测；在背景/方法/基线/指标等章节引用时注明来自哪篇论文的哪个核对字段；verifiedEvidence 为空时不要假装有人工核对内容。
 
 输出格式：只输出一个 JSON 对象。
 {"title":"方案题目","sections":{"problem":"一句话研究问题","background":"背景与已有证据（引用数字）","novelty":"方向位置与新颖性边界","hypotheses":"可验证假设（至少一条可证伪）","datasets":"数据集与获取方式（含可获得性状态）","baselines":"基线与对照","method":"方法设计","metrics":"指标与统计方法","experiments":"三层实验：最小可行实验 / 主实验 / 扩展实验，每层写明时间、算力、成功标准与失败后的替代路线","resources":"复现与资源需求","risks":"风险与失败判据","milestones":"里程碑与时间安排","outcomes":"预期结果与替代路线","references":"代表性参考文献（只能列 context.clusters[].papers 里出现过的论文，写标题+年份+被引，不要列期刊或数据集充数）","evidenceIndex":"证据索引：列出用到的 evidence ID 与对应数字"},"chainAudit":"四步逻辑链自洽检查：局限→想法、想法→挑战、挑战→方法、方法→结果，逐环写通过或断链与修法","scores":[{"dimension":"证据充分度","score":3,"reason":"扣分原因"}],"missing":["缺少的关键约束"],"evidenceIds":["cluster:xxx:size"]}
@@ -376,18 +377,45 @@ const SCORE_DIMENSIONS = [
   "风险可控性",
 ] as const;
 
-/** 只保留模型实际给出的证据 ID，并且必须存在于允许列表里。 */
-function filterEvidenceIds(value: unknown, allowed: Set<string>): string[] {
+/** 保留模型给出的证据 ID（含无效 ID），交由前端标出「未识别的引用」，而不是静默丢弃。 */
+function filterEvidenceIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const ids: string[] = [];
   for (const item of value) {
     if (typeof item !== "string") continue;
     const id = item.trim();
-    if (!id || !allowed.has(id)) continue;
+    if (!id) continue;
     if (!ids.includes(id)) ids.push(id);
     if (ids.length >= 8) break;
   }
   return ids;
+}
+
+/** 用户已核对、随请求提交的证据字段（人工核对内容，优先级高于模型推测）。 */
+function readVerifiedEvidence(value: unknown): {
+  paperId: string;
+  paperTitle: string;
+  fields: { label: string; value: string; location?: string }[];
+}[] {
+  if (!Array.isArray(value)) return [];
+  const out: { paperId: string; paperTitle: string; fields: { label: string; value: string; location?: string }[] }[] = [];
+  for (const item of value.slice(0, 12)) {
+    if (!isRecord(item)) continue;
+    const paperId = readText(item.paperId, 120);
+    const paperTitle = readText(item.paperTitle, 200);
+    if (!paperId || !Array.isArray(item.fields)) continue;
+    const fields: { label: string; value: string; location?: string }[] = [];
+    for (const f of item.fields.slice(0, 10)) {
+      if (!isRecord(f)) continue;
+      const label = readText(f.label, 40);
+      const val = readText(f.value, 600);
+      if (!label || !val) continue;
+      const location = readText(f.location, 80);
+      fields.push({ label, value: val, ...(location ? { location } : {}) });
+    }
+    if (fields.length > 0) out.push({ paperId, paperTitle: paperTitle || paperId, fields });
+  }
+  return out;
 }
 
 function parseSuggestions(value: unknown, allowed: Set<string>) {
@@ -408,7 +436,7 @@ function parseSuggestions(value: unknown, allowed: Set<string>) {
     suggestions.push({
       ...texts,
       feasibility: Math.min(5, Math.max(1, Math.round(feasibility))),
-      evidenceIds: filterEvidenceIds(item.evidenceIds, allowed),
+      evidenceIds: filterEvidenceIds(item.evidenceIds),
     });
     if (suggestions.length >= 6) break;
   }
@@ -452,7 +480,7 @@ function parsePlan(value: unknown, allowed: Set<string>) {
     chainAudit: readText(value.chainAudit, 1200),
     scores,
     missing,
-    evidenceIds: filterEvidenceIds(value.evidenceIds, allowed),
+    evidenceIds: filterEvidenceIds(value.evidenceIds),
   };
 }
 
@@ -780,7 +808,11 @@ export async function handler(request: Request): Promise<Response> {
 
   if (request.method === "GET" && action === "status") {
     return json(
-      { ok: true, upstream: upstreamAuthFailed ? "auth_failed" : "ready" },
+      {
+        ok: true,
+        configured: Boolean(Deno.env.get("QWEN_API_KEY")),
+        upstream: upstreamAuthFailed ? "auth_failed" : "ready",
+      },
       200,
     );
   }
@@ -917,6 +949,7 @@ export async function handler(request: Request): Promise<Response> {
   if (action === "plan") {
     const constraints = parseConstraints(payload?.constraints);
     const resources = parseResources(payload?.resources);
+    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
     const result = await callModel(
       apiKey,
       `${PLAN_SYSTEM_PROMPT}\n${PLAN_RESOURCE_RULE}`,
@@ -931,6 +964,7 @@ export async function handler(request: Request): Promise<Response> {
           license: resource.license,
           accessCondition: resource.accessCondition,
         })),
+        verifiedEvidence,
       },
       8192,
     );

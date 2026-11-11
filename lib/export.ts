@@ -146,6 +146,12 @@ export interface PlanExportOptions {
   evidence?: { id: string; label: string; value: string; origin: string }[];
   /** 模型编造的证据 ID */
   unknownEvidence?: string[];
+  /** 用户已核对、随本次生成提交的证据字段 */
+  verifiedEvidence?: {
+    paperId: string;
+    paperTitle: string;
+    fields: { label: string; value: string; location?: string; verifiedAt?: string }[];
+  }[];
   generatedAt?: string;
   model?: string;
 }
@@ -227,6 +233,19 @@ export function researchPlanToMarkdown(
     lines.push("## 附：未识别的证据引用", "");
     for (const id of options.unknownEvidence) lines.push(`- ${id}`);
     lines.push("");
+  }
+
+  if (options.verifiedEvidence && options.verifiedEvidence.length > 0) {
+    lines.push("## 附：本次提交的人工已核对证据", "");
+    for (const item of options.verifiedEvidence) {
+      lines.push(`### ${item.paperTitle}（${item.paperId}）`, "");
+      for (const field of item.fields) {
+        const where = field.location ? `（原文位置：${field.location}）` : "";
+        const when = field.verifiedAt ? `［核对于 ${field.verifiedAt.slice(0, 10)}］` : "";
+        lines.push(`- ${field.label}${where}${when}: ${field.value}`);
+      }
+      lines.push("");
+    }
   }
 
   lines.push("---", "");

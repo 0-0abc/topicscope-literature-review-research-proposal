@@ -15,7 +15,7 @@ export interface PaperProvenance {
   dedupKey: string;
   /** 当前材料是否包含摘要 */
   abstractAvailable: boolean;
-  /** 是否拿到过开放获取入口 */
+  /** 已验证的开放全文 URL（不含出版商/DOI 落地页）；未验证时为 null */
   oaUrl?: string | null;
 }
 
@@ -33,7 +33,20 @@ export interface Paper {
   abstract: string | null;
   authors: string[];
   authorCount: number;
+  /**
+   * 已验证的开放全文 URL（OA 全文 PDF 或 OA 全文页）。
+   * 出版商/DOI 落地页一律放 publisherUrl，不得计入开放获取统计与评分。
+   */
   oaUrl: string | null;
+  /** 出版商/DOI 落地页（可能付费墙，不代表开放获取） */
+  publisherUrl?: string | null;
+  /**
+   * 开放获取核验状态：
+   * verified = 来源明确给出的 OA 全文链接；
+   * publisher_only = 只有出版商/DOI 落地页；
+   * none = 没有任何全文入口。
+   */
+  oaStatus?: "verified" | "publisher_only" | "none";
   provenance: PaperProvenance;
 }
 

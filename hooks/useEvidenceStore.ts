@@ -16,12 +16,20 @@ export const EVIDENCE_FIELDS = [
 
 export type EvidenceFieldKey = (typeof EVIDENCE_FIELDS)[number]["key"];
 
+/** 单个字段的核对元信息：核对时间 + 原文位置（页码 / 章节 / 图表号）。 */
+export interface FieldVerification {
+  verifiedAt: string;
+  location?: string;
+}
+
 export interface EvidenceNote {
   paperId: string;
   /** 字段内容 */
   fields: Partial<Record<EvidenceFieldKey, string>>;
   /** 用户逐条确认过的字段 */
   verifiedFields: EvidenceFieldKey[];
+  /** 每个已核对字段的时间与原文位置 */
+  fieldMeta?: Partial<Record<EvidenceFieldKey, FieldVerification>>;
   /** 用户已核对全文 */
   fullTextVerified: boolean;
   updatedAt: string;
@@ -50,22 +58,71 @@ function writeNotes(notes: Record<string, EvidenceNote>): void {
   }
 }
 
+function emptyNote(paperId: string): EvidenceNote {
+  return {
+    paperId,
+    fields: {},
+    verifiedFields: [],
+    fieldMeta: {},
+    fullTextVerified: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** 合并两份标注：同篇同字段冲突时保留 keep 侧（当前），其余并入。用于存档「合并载入」。 */
+export function mergeEvidenceNotes(
+  keep: Record<string, EvidenceNote>,
+  incoming: Record<string, EvidenceNote>,
+): Record<string, EvidenceNote> {
+  const out: Record<string, EvidenceNote> = { ...incoming };
+  for (const [paperId, current] of Object.entries(keep)) {
+    const base = out[paperId];
+    if (!base) {
+      out[paperId] = current;
+      continue;
+    }
+    out[paperId] = {
+      ...base,
+      ...current,
+      paperId,
+      fields: { ...base.fields, ...current.fields },
+      fieldMeta: { ...base.fieldMeta, ...current.fieldMeta },
+      verifiedFields: Array.from(new Set([...base.verifiedFields, ...current.verifiedFields])),
+      fullTextVerified: base.fullTextVerified || current.fullTextVerified,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return out;
+}
+
 export function useEvidenceStore() {
   const [notes, setNotes] = useState<Record<string, EvidenceNote>>(() => readNotes());
 
   const update = useCallback((paperId: string, patch: Partial<EvidenceNote>) => {
     setNotes((prev) => {
-      const current = prev[paperId] ?? {
-        paperId,
-        fields: {},
-        verifiedFields: [],
-        fullTextVerified: false,
-        updatedAt: new Date().toISOString(),
-      };
-      const next = {
+      const current = prev[paperId] ?? emptyNote(paperId);
+      const next = { ...current, ...patch, paperId, updatedAt: new Date().toISOString() };
+      const store = { ...prev, [paperId]: next };
+      writeNotes(store);
+      return store;
+    });
+  }, []);
+
+  const setField = useCallback((paperId: string, key: EvidenceFieldKey, value: string) => {
+    setNotes((prev) => {
+      const current = prev[paperId] ?? emptyNote(paperId);
+      const fields = { ...current.fields };
+      if (value.trim()) fields[key] = value;
+      else delete fields[key];
+      // 内容一旦改动，旧的「已核对」不再成立：自动撤销该字段核对标记与元信息
+      const verifiedFields = current.verifiedFields.filter((item) => item !== key);
+      const fieldMeta = { ...current.fieldMeta };
+      delete fieldMeta[key];
+      const next: EvidenceNote = {
         ...current,
-        ...patch,
-        paperId,
+        fields,
+        verifiedFields,
+        fieldMeta,
         updatedAt: new Date().toISOString(),
       };
       const store = { ...prev, [paperId]: next };
@@ -74,74 +131,83 @@ export function useEvidenceStore() {
     });
   }, []);
 
-  const setField = useCallback(
-    (paperId: string, key: EvidenceFieldKey, value: string) => {
-      setNotes((prev) => {
-        const current = prev[paperId] ?? {
-          paperId,
-          fields: {},
-          verifiedFields: [],
-          fullTextVerified: false,
-          updatedAt: new Date().toISOString(),
+  const setFieldLocation = useCallback((paperId: string, key: EvidenceFieldKey, location: string) => {
+    setNotes((prev) => {
+      const current = prev[paperId] ?? emptyNote(paperId);
+      const fieldMeta = { ...current.fieldMeta };
+      const existing = fieldMeta[key];
+      if (location.trim()) {
+        fieldMeta[key] = {
+          verifiedAt: existing?.verifiedAt ?? new Date().toISOString(),
+          location: location.trim(),
         };
-        const fields = { ...current.fields };
-        if (value.trim()) fields[key] = value;
-        else delete fields[key];
-        const next: EvidenceNote = { ...current, fields, updatedAt: new Date().toISOString() };
-        const store = { ...prev, [paperId]: next };
-        writeNotes(store);
-        return store;
-      });
-    },
-    [],
-  );
+      } else if (existing) {
+        fieldMeta[key] = { verifiedAt: existing.verifiedAt };
+      }
+      const next: EvidenceNote = { ...current, fieldMeta, updatedAt: new Date().toISOString() };
+      const store = { ...prev, [paperId]: next };
+      writeNotes(store);
+      return store;
+    });
+  }, []);
 
   const toggleFieldVerified = useCallback((paperId: string, key: EvidenceFieldKey) => {
     setNotes((prev) => {
-      const current = prev[paperId] ?? {
-        paperId,
-        fields: {},
-        verifiedFields: [],
-        fullTextVerified: false,
-        updatedAt: new Date().toISOString(),
-      };
-      const verifiedFields = current.verifiedFields.includes(key)
-        ? current.verifiedFields.filter((item) => item !== key)
-        : [...current.verifiedFields, key];
-      const next: EvidenceNote = { ...current, verifiedFields, updatedAt: new Date().toISOString() };
+      const current = prev[paperId] ?? emptyNote(paperId);
+      // 空字段不允许标记为已核对
+      if (!current.fields[key]?.trim() && !current.verifiedFields.includes(key)) return prev;
+      const verifying = !current.verifiedFields.includes(key);
+      const verifiedFields = verifying
+        ? [...current.verifiedFields, key]
+        : current.verifiedFields.filter((item) => item !== key);
+      const fieldMeta = { ...current.fieldMeta };
+      if (verifying) {
+        fieldMeta[key] = { verifiedAt: new Date().toISOString(), location: fieldMeta[key]?.location };
+      } else {
+        delete fieldMeta[key];
+      }
+      const next: EvidenceNote = { ...current, verifiedFields, fieldMeta, updatedAt: new Date().toISOString() };
       const store = { ...prev, [paperId]: next };
       writeNotes(store);
       return store;
     });
   }, []);
 
-  const toggleFullText = useCallback(
-    (paperId: string) => {
-      setNotes((prev) => {
-        const current = prev[paperId] ?? {
-          paperId,
-          fields: {},
-          verifiedFields: [],
-          fullTextVerified: false,
-          updatedAt: new Date().toISOString(),
-        };
-        const next: EvidenceNote = {
-          ...current,
-          fullTextVerified: !current.fullTextVerified,
-          updatedAt: new Date().toISOString(),
-        };
-        const store = { ...prev, [paperId]: next };
-        writeNotes(store);
-        return store;
-      });
-    },
-    [],
-  );
-
-  const replaceAll = useCallback((notes: Record<string, EvidenceNote>) => {
-    setNotes(notes);
-    writeNotes(notes);
+  const toggleFullText = useCallback((paperId: string) => {
+    setNotes((prev) => {
+      const current = prev[paperId] ?? emptyNote(paperId);
+      const next: EvidenceNote = {
+        ...current,
+        fullTextVerified: !current.fullTextVerified,
+        updatedAt: new Date().toISOString(),
+      };
+      const store = { ...prev, [paperId]: next };
+      writeNotes(store);
+      return store;
+    });
   }, []);
 
-  return { notes, setField, toggleFieldVerified, toggleFullText, update, replaceAll };
+  const replaceAll = useCallback((next: Record<string, EvidenceNote>) => {
+    setNotes(next);
+    writeNotes(next);
+  }, []);
+
+  const mergeAll = useCallback((incoming: Record<string, EvidenceNote>) => {
+    setNotes((prev) => {
+      const merged = mergeEvidenceNotes(prev, incoming);
+      writeNotes(merged);
+      return merged;
+    });
+  }, []);
+
+  return {
+    notes,
+    setField,
+    setFieldLocation,
+    toggleFieldVerified,
+    toggleFullText,
+    update,
+    replaceAll,
+    mergeAll,
+  };
 }

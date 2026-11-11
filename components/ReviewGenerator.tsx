@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ApiError, requestJson } from "@/lib/api";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
+import { AiServiceNotice } from "@/components/AiServiceNotice";
 import type { DirectionContext } from "@/lib/ai/directions";
 import {
   buildReviewPayload,
@@ -48,7 +49,9 @@ export function ReviewGenerator({ context, radar, byId, report }: Props) {
     return buildReviewPayload(context, radar, byId);
   }, [context, radar, byId]);
 
-  if (available !== true) return null;
+  if (available !== "ready") {
+    return <AiServiceNotice status={available} feature="文献综述生成" />;
+  }
 
   const generate = async () => {
     if (!prepared) return;
