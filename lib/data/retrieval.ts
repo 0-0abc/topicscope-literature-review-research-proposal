@@ -6,7 +6,16 @@ import { dedupPapers } from "./dedup";
 const CACHE_PREFIX = "topicscope.cache.v2.";
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 
-export type RetrievalSource = "openalex" | "crossref";
+export type RetrievalSource = "openalex" | "crossref" | "server";
+
+export function sourceLabel(name: string): string {
+  if (name === "openalex") return "OpenAlex";
+  if (name === "crossref") return "Crossref";
+  if (name === "semanticscholar") return "Semantic Scholar";
+  if (name === "snapshot") return "离线快照";
+  if (name === "user_import") return "用户导入";
+  return name;
+}
 
 export interface RetrievalResult {
   papers: Paper[];
@@ -52,6 +61,38 @@ function writeCache(query: string, entry: CacheEntry): void {
   }
 }
 
+function cacheLabel(source: RetrievalSource): string {
+  if (source === "crossref") return "Crossref";
+  if (source === "server") return "站点服务端多源";
+  return "OpenAlex";
+}
+
+interface ServerSearchResponse {
+  ok: boolean;
+  papers: Paper[];
+  report: SearchReport;
+  source: string;
+  degraded: boolean;
+  cached: boolean;
+  detail: string;
+}
+
+async function serverSearch(query: string, force: boolean): Promise<ServerSearchResponse | null> {
+  try {
+    const response = await fetch(
+      `/functions/v1/app/search?q=${encodeURIComponent(query)}${force ? "&refresh=1" : ""}`,
+      { credentials: "same-origin" },
+    );
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) return null;
+    const body = (await response.json().catch(() => null)) as ServerSearchResponse | null;
+    if (!body || body.ok !== true || !Array.isArray(body.papers) || body.papers.length === 0) return null;
+    return body;
+  } catch {
+    return null;
+  }
+}
+
 function coverage(papers: Paper[]): { abstractCoverage: number; oaCoverage: number } {
   if (papers.length === 0) return { abstractCoverage: 0, oaCoverage: 0 };
   const withAbstract = papers.filter((paper) => paper.provenance.abstractAvailable).length;
@@ -92,16 +133,35 @@ export async function retrieve(
   if (!options.force) {
     const cached = readCache(trimmed);
     if (cached) {
-      const label = cached.source === "crossref" ? "Crossref" : "OpenAlex";
       return {
         papers: cached.papers,
         report: cached.report,
         source: cached.source,
         fromCache: true,
         degraded: cached.source === "crossref",
-        detail: `命中本地缓存：${cached.papers.length} 篇 ${label} 结果，12 小时内重复检索不再消耗接口额度。`,
+        detail: `命中本地缓存：${cached.papers.length} 篇 ${cacheLabel(cached.source)} 结果，12 小时内重复检索不再消耗接口额度。`,
       };
     }
+  }
+
+  // 服务端检索优先：站点 Function 用 Secret 里的 key 检索（OpenAlex 主源 + Semantic Scholar
+  // 第二主源合并），结果在服务端缓存 12 小时供所有访客共享；静态部署（无后端）时回退浏览器直连。
+  const server = await serverSearch(trimmed, options.force === true);
+  if (server) {
+    writeCache(trimmed, {
+      ts: Date.now(),
+      source: "server",
+      papers: server.papers,
+      report: server.report,
+    });
+    return {
+      papers: server.papers,
+      report: server.report,
+      source: "server",
+      fromCache: server.cached,
+      degraded: server.degraded,
+      detail: server.detail,
+    };
   }
 
   const sourcePlan: SourceName[] = ["openalex", "crossref"];

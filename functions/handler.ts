@@ -877,6 +877,534 @@ const ERROR_MESSAGE: Record<string, string> = {
   bad_request: "请求内容不完整或格式不对。",
 };
 
+// ---------------------------------------------------------------------------
+// 服务端检索：OpenAlex（站点 Secret OA_API_KEY）主源 + Semantic Scholar 补充
+// + Crossref 降级，全部结果在服务端按检索词缓存 12 小时，所有访客共享，
+// 上游额度消耗与访客数解耦。客户端只发一个 GET /search?q=…。
+// ---------------------------------------------------------------------------
+
+interface ServerPaper {
+  id: string;
+  doi: string | null;
+  title: string;
+  year: number;
+  citedByCount: number;
+  type: string | null;
+  topics: string[];
+  keywords: string[];
+  venue: string | null;
+  abstract: string | null;
+  authors: string[];
+  authorCount: number;
+  oaUrl: string | null;
+  publisherUrl?: string | null;
+  oaStatus?: "verified" | "publisher_only" | "none";
+  provenance: {
+    source: string;
+    sourceId: string;
+    retrievedAt: string;
+    query?: string;
+    filter?: string;
+    dedupKey: string;
+    abstractAvailable: boolean;
+    oaUrl?: string | null;
+  };
+}
+
+interface ServerSourceReport {
+  source: string;
+  filter: string;
+  returned: number;
+  failed: boolean;
+  error?: string;
+  abstractCoverage: number;
+  oaCoverage: number;
+}
+
+interface ServerReport {
+  job: {
+    rawQuestion: string;
+    queryVariants: string[];
+    constraints: Record<string, unknown>;
+    sourcePlan: string[];
+  };
+  sourceReports: ServerSourceReport[];
+  totalBeforeDedup: number;
+  totalAfterDedup: number;
+  removedByDedup: number;
+  abstractCoverage: number;
+  oaCoverage: number;
+  limitations: string[];
+  sampleFrame: string;
+  fromCache: boolean;
+  degraded: boolean;
+  retrievedAt: string;
+}
+
+const SEARCH_CONTACT = "209879754@qq.com";
+const SEARCH_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const SEARCH_CACHE_MAX = 60;
+const SEARCH_RATE_MAX = 30;
+const SEARCH_RATE_WINDOW_MS = 10 * 60 * 1000;
+const searchCache = new Map<string, { ts: number; papers: ServerPaper[]; report: ServerReport }>();
+const searchBuckets = new Map<string, { count: number; resetAt: number }>();
+const SEARCH_SAMPLE_FRAME =
+  "在线检索分别取「高被引」与「最新发表」两批结果，属于偏向性抽样；界面里的占比不等于真实领域产出比例。";
+
+function normalizeDoi(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const raw = value.trim().toLowerCase().replace(/^https?:\/\/(dx\.)?doi\.org\//, "");
+  return raw.startsWith("10.") ? raw : null;
+}
+
+function normalizeTitle(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "").trim();
+}
+
+function serverCoverage(papers: ServerPaper[]): { abstractCoverage: number; oaCoverage: number } {
+  if (papers.length === 0) return { abstractCoverage: 0, oaCoverage: 0 };
+  const withAbstract = papers.filter((p) => p.provenance.abstractAvailable).length;
+  const withOa = papers.filter((p) => p.oaUrl).length;
+  return {
+    abstractCoverage: Math.round((withAbstract / papers.length) * 100),
+    oaCoverage: Math.round((withOa / papers.length) * 100),
+  };
+}
+
+function serverDedup(papers: ServerPaper[]): { papers: ServerPaper[]; removed: number } {
+  const byDoi = new Set<string>();
+  const bySourceId = new Set<string>();
+  const byTitle = new Set<string>();
+  const kept: ServerPaper[] = [];
+  let removed = 0;
+  for (const paper of papers) {
+    const doi = paper.provenance.dedupKey.startsWith("doi:")
+      ? paper.provenance.dedupKey.slice(4)
+      : null;
+    const sourceIdKey = `id:${paper.provenance.source}:${paper.provenance.sourceId}`;
+    const titleKey = `t:${normalizeTitle(paper.title)}`;
+    if (
+      (doi !== null && byDoi.has(doi)) ||
+      bySourceId.has(sourceIdKey) ||
+      (titleKey !== "t:" && byTitle.has(titleKey))
+    ) {
+      removed += 1;
+      continue;
+    }
+    if (doi !== null) byDoi.add(doi);
+    bySourceId.add(sourceIdKey);
+    if (titleKey !== "t:") byTitle.add(titleKey);
+    kept.push(paper);
+  }
+  return { papers: kept, removed };
+}
+
+function rebuildAbstractIndex(index: Record<string, number[]> | null): string | null {
+  if (!index) return null;
+  const slots: string[] = [];
+  for (const [token, positions] of Object.entries(index)) {
+    for (const position of positions) slots[position] = token;
+  }
+  const text = slots.filter(Boolean).join(" ").trim();
+  return text.length > 0 ? text : null;
+}
+
+function jatsText(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === "string") {
+    const text = value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return text.length > 40 ? text : null;
+  }
+  return null;
+}
+
+async function fetchJsonWithTimeout(url: URL, timeoutMs = 15000): Promise<Response> {
+  return fetch(url, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
+interface OpenAlexWork {
+  id: string;
+  doi: string | null;
+  title: string | null;
+  publication_year: number | null;
+  cited_by_count: number;
+  type: string | null;
+  topics: { display_name: string }[] | null;
+  keywords: { display_name: string }[] | null;
+  primary_location: { source: { display_name: string } | null; landing_page_url?: string | null } | null;
+  abstract_inverted_index: Record<string, number[]> | null;
+  authorships: { author: { display_name: string } }[] | null;
+  open_access: { oa_url: string | null } | null;
+  best_oa_location: { landing_page_url: string | null; pdf_url: string | null } | null;
+}
+
+const OPENALEX_SELECT = [
+  "id", "doi", "title", "publication_year", "cited_by_count", "type", "topics", "keywords",
+  "primary_location", "abstract_inverted_index", "authorships", "open_access", "best_oa_location",
+].join(",");
+
+function mapOpenAlex(work: OpenAlexWork, query: string, filter: string, retrievedAt: string): ServerPaper | null {
+  if (!work.title) return null;
+  const doi = normalizeDoi(work.doi);
+  const sourceId = work.id.replace(/^https?:\/\/openalex\.org\//, "");
+  const oaUrl =
+    work.best_oa_location?.pdf_url ?? work.best_oa_location?.landing_page_url ?? work.open_access?.oa_url ?? null;
+  const publisherUrl = work.primary_location?.landing_page_url ?? (doi ? `https://doi.org/${doi}` : null);
+  return {
+    id: work.id,
+    doi,
+    title: work.title,
+    year: work.publication_year ?? new Date().getFullYear(),
+    citedByCount: work.cited_by_count ?? 0,
+    type: work.type ?? null,
+    topics: (work.topics ?? []).map((t) => t.display_name).slice(0, 5),
+    keywords: (work.keywords ?? []).map((k) => k.display_name).slice(0, 8),
+    venue: work.primary_location?.source?.display_name ?? null,
+    abstract: rebuildAbstractIndex(work.abstract_inverted_index),
+    authors: (work.authorships ?? []).slice(0, 6).map((a) => a.author.display_name),
+    authorCount: (work.authorships ?? []).length,
+    oaUrl,
+    publisherUrl,
+    oaStatus: oaUrl ? "verified" : publisherUrl ? "publisher_only" : "none",
+    provenance: {
+      source: "openalex",
+      sourceId,
+      retrievedAt,
+      query,
+      filter,
+      dedupKey: doi ? `doi:${doi}` : `id:openalex:${sourceId}`,
+      abstractAvailable: Boolean(work.abstract_inverted_index),
+      oaUrl,
+    },
+  };
+}
+
+async function fetchOpenAlexServer(query: string, apiKey: string | undefined, filter: string, perPage: number, sort: string): Promise<OpenAlexWork[]> {
+  const url = new URL("https://api.openalex.org/works");
+  url.searchParams.set("filter", filter);
+  url.searchParams.set("sort", sort);
+  url.searchParams.set("per-page", String(perPage));
+  url.searchParams.set("select", OPENALEX_SELECT);
+  url.searchParams.set("mailto", SEARCH_CONTACT);
+  if (apiKey) url.searchParams.set("api_key", apiKey);
+  const response = await fetchJsonWithTimeout(url);
+  if (!response.ok) throw new Error(`OpenAlex ${response.status}`);
+  const body = (await response.json()) as { results: OpenAlexWork[] };
+  return body.results ?? [];
+}
+
+interface S2Work {
+  paperId: string;
+  title: string | null;
+  abstract: string | null;
+  year: number | null;
+  citationCount: number | null;
+  venue: string | null;
+  externalIds: { DOI?: string } | null;
+  openAccessPdf: { url: string } | null;
+  fieldsOfStudy: string[] | null;
+  authors: { name: string }[] | null;
+}
+
+const S2_FIELDS = "paperId,title,abstract,year,citationCount,venue,externalIds,openAccessPdf,fieldsOfStudy,authors";
+
+function mapS2(work: S2Work, query: string, filter: string, retrievedAt: string): ServerPaper | null {
+  if (!work.title) return null;
+  const doi = normalizeDoi(work.externalIds?.DOI ?? null);
+  const oaUrl = work.openAccessPdf?.url ?? null;
+  return {
+    id: `https://semanticscholar.org/paper/${work.paperId}`,
+    doi,
+    title: work.title,
+    year: work.year ?? new Date().getFullYear(),
+    citedByCount: work.citationCount ?? 0,
+    type: null,
+    topics: (work.fieldsOfStudy ?? []).slice(0, 5),
+    keywords: [],
+    venue: work.venue ?? null,
+    abstract: work.abstract ?? null,
+    authors: (work.authors ?? []).slice(0, 6).map((a) => a.name),
+    authorCount: (work.authors ?? []).length,
+    oaUrl,
+    publisherUrl: doi ? `https://doi.org/${doi}` : null,
+    oaStatus: oaUrl ? "verified" : doi ? "publisher_only" : "none",
+    provenance: {
+      source: "semanticscholar",
+      sourceId: work.paperId,
+      retrievedAt,
+      query,
+      filter,
+      dedupKey: doi ? `doi:${doi}` : `id:semanticscholar:${work.paperId}`,
+      abstractAvailable: Boolean(work.abstract),
+      oaUrl,
+    },
+  };
+}
+
+async function fetchS2(query: string, fromYear: number, toYear: number, retrievedAt: string, filter: string): Promise<{ papers: ServerPaper[]; returned: number } | null> {
+  try {
+    const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search");
+    url.searchParams.set("query", query);
+    url.searchParams.set("limit", "100");
+    url.searchParams.set("year", `${fromYear}-${toYear}`);
+    url.searchParams.set("fields", S2_FIELDS);
+    const response = await fetchJsonWithTimeout(url);
+    if (!response.ok) return null;
+    const body = (await response.json()) as { data?: S2Work[] };
+    const papers = (body.data ?? [])
+      .map((work) => mapS2(work, query, filter, retrievedAt))
+      .filter((p): p is ServerPaper => p !== null);
+    return { papers, returned: papers.length };
+  } catch {
+    return null;
+  }
+}
+
+function mergeS2(primary: ServerPaper[], secondary: ServerPaper[]): { papers: ServerPaper[]; enriched: number; added: number } {
+  const index = new Map<string, ServerPaper>();
+  for (const paper of primary) {
+    if (paper.doi) index.set(paper.doi, paper);
+    index.set(`t:${normalizeTitle(paper.title)}`, paper);
+  }
+  const out = [...primary];
+  let enriched = 0;
+  let added = 0;
+  for (const candidate of secondary) {
+    const hit = candidate.doi
+      ? index.get(candidate.doi) ?? index.get(`t:${normalizeTitle(candidate.title)}`)
+      : index.get(`t:${normalizeTitle(candidate.title)}`);
+    if (hit) {
+      let changed = false;
+      if (!hit.abstract && candidate.abstract) {
+        hit.abstract = candidate.abstract;
+        hit.provenance.abstractAvailable = true;
+        changed = true;
+      }
+      if (!hit.oaUrl && candidate.oaUrl) {
+        hit.oaUrl = candidate.oaUrl;
+        hit.oaStatus = "verified";
+        hit.provenance.oaUrl = candidate.oaUrl;
+        changed = true;
+      }
+      if (changed) enriched += 1;
+      continue;
+    }
+    index.set(`t:${normalizeTitle(candidate.title)}`, candidate);
+    if (candidate.doi) index.set(candidate.doi, candidate);
+    out.push(candidate);
+    added += 1;
+  }
+  return { papers: out, enriched, added };
+}
+
+interface CrossrefItem {
+  DOI?: string;
+  title?: string[];
+  issued?: { "date-parts"?: number[][] };
+  "is-referenced-by-count"?: number;
+  "container-title"?: string[];
+  abstract?: unknown;
+  link?: { URL?: string; "content-type"?: string }[];
+  URL?: string;
+  author?: { given?: string; family?: string }[];
+  type?: string;
+}
+
+function mapCrossref(item: CrossrefItem, query: string, filter: string, retrievedAt: string): ServerPaper | null {
+  const title = item.title?.[0];
+  if (!title) return null;
+  const doi = normalizeDoi(item.DOI ?? null);
+  const pdfLink = (item.link ?? []).find((l) => (l["content-type"] ?? "").includes("application/pdf"))?.URL ?? null;
+  const publisherUrl = item.URL ?? (doi ? `https://doi.org/${doi}` : null);
+  const oaUrl = pdfLink;
+  const abstract = jatsText(item.abstract);
+  return {
+    id: doi ? `https://doi.org/${doi}` : `https://api.crossref.org/works/${encodeURIComponent(item.DOI ?? title)}`,
+    doi,
+    title,
+    year: item.issued?.["date-parts"]?.[0]?.[0] ?? new Date().getFullYear(),
+    citedByCount: item["is-referenced-by-count"] ?? 0,
+    type: item.type ?? null,
+    topics: [],
+    keywords: [],
+    venue: item["container-title"]?.[0] ?? null,
+    abstract,
+    authors: (item.author ?? []).slice(0, 6).map((a) => [a.given, a.family].filter(Boolean).join(" ")),
+    authorCount: (item.author ?? []).length,
+    oaUrl,
+    publisherUrl,
+    oaStatus: oaUrl ? "verified" : publisherUrl ? "publisher_only" : "none",
+    provenance: {
+      source: "crossref",
+      sourceId: item.DOI ?? title,
+      retrievedAt,
+      query,
+      filter,
+      dedupKey: doi ? `doi:${doi}` : `id:crossref:${encodeURIComponent(item.DOI ?? title)}`,
+      abstractAvailable: Boolean(abstract),
+      oaUrl,
+    },
+  };
+}
+
+async function fetchCrossrefServer(query: string, retrievedAt: string, filter: string): Promise<ServerPaper[]> {
+  const url = new URL("https://api.crossref.org/works");
+  url.searchParams.set("query.bibliographic", query);
+  url.searchParams.set("rows", "100");
+  url.searchParams.set("mailto", SEARCH_CONTACT);
+  const response = await fetchJsonWithTimeout(url, 20000);
+  if (!response.ok) throw new Error(`Crossref ${response.status}`);
+  const body = (await response.json()) as { message?: { items?: CrossrefItem[] } };
+  return (body.message?.items ?? [])
+    .map((item) => mapCrossref(item, query, filter, retrievedAt))
+    .filter((p): p is ServerPaper => p !== null);
+}
+
+async function serverRetrieve(query: string): Promise<{
+  papers: ServerPaper[];
+  report: ServerReport;
+  source: string;
+  degraded: boolean;
+  detail: string;
+}> {
+  const retrievedAt = new Date().toISOString();
+  const toYear = new Date().getFullYear();
+  const fromYear = toYear - 7;
+  const oaFilter = [
+    `title_and_abstract.search:${query}`,
+    `from_publication_date:${fromYear}-01-01`,
+    `to_publication_date:${toYear}-12-31`,
+  ].join(",");
+  const s2Filter = `semantic scholar search:${query}（${fromYear}–${toYear}）`;
+  const oaKey = Deno.env.get("OA_API_KEY") ?? undefined;
+
+  try {
+    const [classic, recent] = await Promise.all([
+      fetchOpenAlexServer(query, oaKey, oaFilter, 100, "cited_by_count:desc"),
+      fetchOpenAlexServer(query, oaKey, oaFilter, 100, "publication_date:desc"),
+    ]);
+    const seen = new Map<string, OpenAlexWork>();
+    for (const work of [...classic, ...recent]) {
+      if (work.title) seen.set(work.id, work);
+    }
+    const oaPapers = [...seen.values()]
+      .map((work) => mapOpenAlex(work, query, oaFilter, retrievedAt))
+      .filter((p): p is ServerPaper => p !== null);
+    if (oaPapers.length === 0) {
+      throw new Error(`OpenAlex 没有返回「${query}」相关的结果`);
+    }
+
+    const s2 = await fetchS2(query, fromYear, toYear, retrievedAt, s2Filter);
+    const limitations: string[] = [];
+    const sourceReports: ServerSourceReport[] = [];
+    let merged = oaPapers;
+    const oaCov = serverCoverage(oaPapers);
+    sourceReports.push({
+      source: "openalex", filter: oaFilter, returned: oaPapers.length, failed: false,
+      abstractCoverage: oaCov.abstractCoverage, oaCoverage: oaCov.oaCoverage,
+    });
+    if (s2 && s2.papers.length > 0) {
+      const result = mergeS2(oaPapers, s2.papers);
+      merged = result.papers;
+      const s2Cov = serverCoverage(s2.papers);
+      sourceReports.push({
+        source: "semanticscholar", filter: s2Filter, returned: s2.returned, failed: false,
+        abstractCoverage: s2Cov.abstractCoverage, oaCoverage: s2Cov.oaCoverage,
+      });
+      limitations.push(`Semantic Scholar 作为第二主源合并：新增 ${result.added} 篇、为 ${result.enriched} 篇补齐摘要或开放全文链接。`);
+    } else {
+      sourceReports.push({
+        source: "semanticscholar", filter: s2Filter, returned: 0, failed: true,
+        error: "Semantic Scholar 暂不可用，本次结果只来自 OpenAlex。", abstractCoverage: 0, oaCoverage: 0,
+      });
+    }
+
+    const before = merged.length;
+    const { papers: deduped, removed } = serverDedup(merged);
+    const cov = serverCoverage(deduped);
+    if (removed > 0) limitations.push(`多源合并后去重移除 ${removed} 篇重复记录（按 DOI、来源 ID、标题归一化）。`);
+    if (cov.abstractCoverage < 80) limitations.push(`摘要覆盖率 ${cov.abstractCoverage}%，部分结论只能基于元数据。`);
+    limitations.push(SEARCH_SAMPLE_FRAME);
+
+    const report: ServerReport = {
+      job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+      sourceReports,
+      totalBeforeDedup: before,
+      totalAfterDedup: deduped.length,
+      removedByDedup: removed,
+      abstractCoverage: cov.abstractCoverage,
+      oaCoverage: cov.oaCoverage,
+      limitations,
+      sampleFrame: SEARCH_SAMPLE_FRAME,
+      fromCache: false,
+      degraded: false,
+      retrievedAt,
+    };
+    return {
+      papers: deduped,
+      report,
+      source: "openalex",
+      degraded: false,
+      detail: `在线检索（站点服务端）：OpenAlex ${oaPapers.length} 篇主源` +
+        (s2 && s2.papers.length > 0 ? ` + Semantic Scholar 补充合并` : "") +
+        `，去重后 ${deduped.length} 篇；结果已缓存 12 小时供所有访客共享，不随访客数消耗上游额度。`,
+    };
+  } catch (oaError) {
+    const reason = oaError instanceof Error ? oaError.message : "未知错误";
+    const crFilter = `query.bibliographic:${query}`;
+    const papers = await fetchCrossrefServer(query, retrievedAt, crFilter);
+    if (papers.length === 0) throw new Error(`主源与备选源都没有返回「${query}」的结果（${reason}）`);
+    const before = papers.length;
+    const { papers: deduped, removed } = serverDedup(papers);
+    const cov = serverCoverage(deduped);
+    const limitations = [
+      `主来源 OpenAlex 不可用（${reason}），已降级到 Crossref：没有主题标签，摘要覆盖也低。`,
+      ...(removed > 0 ? [`去重后移除 ${removed} 篇重复记录。`] : []),
+      SEARCH_SAMPLE_FRAME,
+    ];
+    const report: ServerReport = {
+      job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+      sourceReports: [
+        { source: "openalex", filter: oaFilter, returned: 0, failed: true, error: reason, abstractCoverage: 0, oaCoverage: 0 },
+        { source: "crossref", filter: crFilter, returned: deduped.length, failed: false, abstractCoverage: cov.abstractCoverage, oaCoverage: cov.oaCoverage },
+      ],
+      totalBeforeDedup: before,
+      totalAfterDedup: deduped.length,
+      removedByDedup: removed,
+      abstractCoverage: cov.abstractCoverage,
+      oaCoverage: cov.oaCoverage,
+      limitations,
+      sampleFrame: SEARCH_SAMPLE_FRAME,
+      fromCache: false,
+      degraded: true,
+      retrievedAt,
+    };
+    return {
+      papers: deduped,
+      report,
+      source: "crossref",
+      degraded: true,
+      detail: `OpenAlex 暂时不可用（${reason}）→ 站点服务端已改用 Crossref：${deduped.length} 篇，结果缓存 12 小时。`,
+    };
+  }
+}
+
+function checkSearchRate(request: Request): boolean {
+  const now = Date.now();
+  const key = clientIp(request);
+  const bucket = searchBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    searchBuckets.set(key, { count: 1, resetAt: now + SEARCH_RATE_WINDOW_MS });
+    return true;
+  }
+  if (bucket.count >= SEARCH_RATE_MAX) return false;
+  bucket.count += 1;
+  return true;
+}
+
 export async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url);
   // 网关会把 /functions/v1/app 换成后端函数名并保留子路径，这里只取最后一段动作名
@@ -889,9 +1417,48 @@ export async function handler(request: Request): Promise<Response> {
     action !== "review" &&
     action !== "feasibility" &&
     action !== "chat" &&
+    action !== "search" &&
     action !== "status"
   ) {
     return fail("not_found", "没有这个接口。", 404);
+  }
+
+  if (request.method === "GET" && action === "search") {
+    const q = (url.searchParams.get("q") ?? "").trim().slice(0, 200);
+    if (!q) return fail("bad_request", "缺少检索词 q。", 400);
+    if (!checkSearchRate(request)) {
+      return fail("rate_limited", "检索过于频繁，请稍后再试。", 429);
+    }
+    const cacheKey = q.toLowerCase();
+    const refresh = url.searchParams.get("refresh") === "1";
+    if (!refresh) {
+      const cached = searchCache.get(cacheKey);
+      if (cached && Date.now() - cached.ts <= SEARCH_CACHE_TTL_MS) {
+        return json(
+          {
+            ok: true,
+            papers: cached.papers,
+            report: { ...cached.report, fromCache: true },
+            source: cached.report.degraded ? "crossref" : "openalex",
+            degraded: cached.report.degraded,
+            cached: true,
+            detail: `命中站点共享缓存：${cached.papers.length} 篇，12 小时内重复检索不消耗上游额度。`,
+          },
+          200,
+        );
+      }
+    }
+    try {
+      const result = await serverRetrieve(q);
+      searchCache.set(cacheKey, { ts: Date.now(), papers: result.papers, report: result.report });
+      if (searchCache.size > SEARCH_CACHE_MAX) {
+        const oldest = [...searchCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+        if (oldest) searchCache.delete(oldest[0]);
+      }
+      return json({ ok: true, ...result, cached: false }, 200);
+    } catch (error) {
+      return fail("upstream_error", error instanceof Error ? error.message : "检索失败，请稍后再试。", 502);
+    }
   }
 
   if (request.method === "GET" && action === "status") {
@@ -899,6 +1466,7 @@ export async function handler(request: Request): Promise<Response> {
       {
         ok: true,
         configured: Boolean(Deno.env.get("QWEN_API_KEY")),
+        oaConfigured: Boolean(Deno.env.get("OA_API_KEY")),
         upstream: upstreamAuthFailed ? "auth_failed" : "ready",
       },
       200,

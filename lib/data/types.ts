@@ -1,4 +1,4 @@
-export type SourceName = "openalex" | "crossref" | "snapshot" | "user_import";
+export type SourceName = "openalex" | "crossref" | "semanticscholar" | "snapshot" | "user_import";
 
 /** 每篇论文的来源与访问状态，判断结论时必须知道材料来自哪里、到哪一层。 */
 export interface PaperProvenance {

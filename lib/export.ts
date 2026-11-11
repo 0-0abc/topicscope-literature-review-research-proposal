@@ -117,9 +117,16 @@ export function searchReportToMarkdown(report: SearchReport): string {
   lines.push(`- 样本框: ${report.sampleFrame}`, "");
 
   lines.push("## 各来源结果", "");
+  const SOURCE_LABELS: Record<string, string> = {
+    openalex: "OpenAlex",
+    crossref: "Crossref",
+    semanticscholar: "Semantic Scholar",
+    snapshot: "离线快照",
+    user_import: "用户导入",
+  };
   for (const source of report.sourceReports) {
     lines.push(
-      `- ${source.source}｜检索式 ${source.filter || "（无）"}｜返回 ${source.returned} 篇｜` +
+      `- ${SOURCE_LABELS[source.source] ?? source.source}｜检索式 ${source.filter || "（无）"}｜返回 ${source.returned} 篇｜` +
         `摘要覆盖 ${source.abstractCoverage}%｜开放获取覆盖 ${source.oaCoverage}%` +
         (source.failed ? `｜失败: ${source.error ?? "未知原因"}` : ""),
     );

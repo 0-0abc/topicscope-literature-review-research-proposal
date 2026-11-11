@@ -172,9 +172,10 @@ export default function App() {
                 />
               </label>
               <p className="text-[11px] leading-relaxed text-muted-foreground sm:max-w-md">
-                key 不会被写进站点代码或打包产物，只在你点击「在线检索」时随请求发往 OpenAlex。
-                没有 key 也能用：免费额度按 IP 计（1000 额度/天，一次检索 2 次请求），同一网络下多人共用容易用尽；
-                填了自己的 key 后额度提升 10 倍。额度用尽时会自动改用 Crossref 备选源，同一检索词 12 小时内走本地缓存、不再消耗额度。
+                站点服务端已配置检索 key：在线检索默认走站点服务端（OpenAlex 主源 + Semantic Scholar
+                第二主源合并，Crossref 兜底），结果服务端缓存 12 小时供所有访客共享，不随访客数消耗额度。
+                这里填的个人 key 只在服务端不可用、浏览器直连回退时使用，仍只保存在本机 localStorage；
+                服务端检索时检索词会经过站点 Function（不经过模型服务）。
               </p>
             </div>
           </div>

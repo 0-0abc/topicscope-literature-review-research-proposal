@@ -147,13 +147,16 @@ export function useCorpus() {
           setState((prev) => ({
             ...prev,
             status: "error",
-            error: `OpenAlex 没有返回「${trimmed}」相关的结果，换个说法试试。`,
+            error: `「${trimmed}」没有返回相关结果，换个说法试试。`,
           }));
           return;
         }
+        // 服务端多源检索在状态栏归并展示为主源（报告里保留逐源明细）
+        const paperSource: PaperSource =
+          result.source === "crossref" ? "crossref" : "openalex";
         analyze(
           result.papers,
-          result.source,
+          paperSource,
           trimmed,
           result.detail,
           false,

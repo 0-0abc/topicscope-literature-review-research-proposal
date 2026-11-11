@@ -56,8 +56,9 @@ export function AiServiceNotice({ status, feature }: { status: ProbeStatus; feat
         </ul>
       </div>
       <p className="text-[11px] leading-relaxed text-muted-foreground">
-        隐私说明：模型生成功能会把你选择的统计数字、论文标题 / 摘要节选、以及你勾选的已核对证据内容发送到站点自带的模型服务；
-        检索词会发往 OpenAlex / Crossref。其余分析计算都在你的浏览器本地完成，不上传。
+        隐私说明：在线检索会把检索词发送到站点服务端（服务端再请求 OpenAlex / Semantic Scholar /
+        Crossref，检索词不会发往模型服务）；模型生成功能会把你选择的统计数字、论文标题 / 摘要节选、
+        以及你勾选的已核对证据内容发送到站点自带的模型服务。其余分析计算都在你的浏览器本地完成，不上传。
       </p>
     </div>
   );
