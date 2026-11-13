@@ -2,6 +2,7 @@ import type { Paper, SearchReport, SourceName, SourceReport } from "./types";
 import { fetchOpenAlex } from "./openalex";
 import { fetchCrossref } from "./crossref";
 import { dedupPapers } from "./dedup";
+import { filterOnTopic } from "./relevance";
 
 const CACHE_PREFIX = "topicscope.cache.v2.";
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
@@ -86,7 +87,9 @@ async function serverSearch(query: string, force: boolean): Promise<ServerSearch
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.includes("application/json")) return null;
     const body = (await response.json().catch(() => null)) as ServerSearchResponse | null;
-    if (!body || body.ok !== true || !Array.isArray(body.papers) || body.papers.length === 0) return null;
+    // ok:true 且 papers 为数组即视为服务端有效应答（含 0 命中）；
+    // 0 命中是「确实没检索到」，不能回退直连 Crossref 产出噪声。
+    if (!body || body.ok !== true || !Array.isArray(body.papers)) return null;
     return body;
   } catch {
     return null;
@@ -148,6 +151,17 @@ export async function retrieve(
   // 第二主源合并），结果在服务端缓存 12 小时供所有访客共享；静态部署（无后端）时回退浏览器直连。
   const server = await serverSearch(trimmed, options.force === true);
   if (server) {
+    // 服务端明确 0 命中：直接返回空结果，交给上层提示「未检索到」，不回退直连产出噪声。
+    if (server.papers.length === 0) {
+      return {
+        papers: [],
+        report: server.report,
+        source: "server",
+        fromCache: server.cached,
+        degraded: server.degraded,
+        detail: server.detail || `未检索到「${trimmed}」相关结果，换个说法试试。`,
+      };
+    }
     writeCache(trimmed, {
       ts: Date.now(),
       source: "server",
@@ -170,7 +184,31 @@ export async function retrieve(
   try {
     const papers = await fetchOpenAlex(trimmed, { apiKey: options.apiKey });
     if (papers.length === 0) {
-      throw new Error(`OpenAlex 没有返回「${trimmed}」相关的结果，换个说法试试。`);
+      // 主源成功但 0 命中：确实没检索到，不降级 Crossref 产出噪声。
+      const emptyReport: SearchReport = {
+        job: { rawQuestion: trimmed, queryVariants: [trimmed], constraints: {}, sourcePlan },
+        sourceReports: [
+          { source: "openalex", filter: `title_and_abstract.search:${trimmed}`, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
+        ],
+        totalBeforeDedup: 0,
+        totalAfterDedup: 0,
+        removedByDedup: 0,
+        abstractCoverage: 0,
+        oaCoverage: 0,
+        limitations: [],
+        sampleFrame: ONLINE_SAMPLE_FRAME,
+        fromCache: false,
+        degraded: false,
+        retrievedAt,
+      };
+      return {
+        papers: [],
+        report: emptyReport,
+        source: "openalex",
+        fromCache: false,
+        degraded: false,
+        detail: `未检索到「${trimmed}」相关结果，换个说法试试。`,
+      };
     }
     const before = papers.length;
     const { papers: deduped, removed } = dedupPapers(papers);
@@ -228,8 +266,9 @@ export async function retrieve(
       oaCoverage: 0,
     };
     try {
-      const papers = await fetchCrossref(trimmed);
-      if (papers.length === 0) throw new Error("备选源没有返回结果");
+      const rawCrossref = await fetchCrossref(trimmed);
+      const papers = filterOnTopic(rawCrossref, trimmed);
+      if (papers.length === 0) throw new Error("备选源没有返回与检索词相关的结果");
       const before = papers.length;
       const { papers: deduped, removed } = dedupPapers(papers);
       const cov = coverage(deduped);
