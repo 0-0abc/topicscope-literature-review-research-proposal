@@ -142,6 +142,7 @@ node_modules/.bin/jiti dev/run-analysis.ts    # 在离线快照上跑聚类与�
 
 ## 许可与署名
 
+- 原创代码采用 **MIT**（`LICENSE`）；第三方与改编内容的许可与署名见 `NOTICE.md`——Supervisor-Skills 改编部分沿用 CC-BY-4.0，不被 MIT 覆盖。
 - 选题体检框架、综述写作纪律、方案逻辑链检查、审稿人速查改编自 [HKUSTDial/Supervisor-Skills](https://github.com/HKUSTDial/Supervisor-Skills)（**CC-BY-4.0**），界面与导出 Markdown 中均保留署名；改编做了简化，不等同于原项目的完整评估。
 - UI 基础来自 Qoder Sites React starter，见 `PROVENANCE.md`；`vendor/` 保留上游样式许可证。
 - 书目数据来自 OpenAlex / Crossref 开放接口，标题与摘要版权归原作者所有。
