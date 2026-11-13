@@ -151,6 +151,16 @@ function fingerprint(input: unknown): string {
   return JSON.stringify(input);
 }
 
+/** 启发式互锁检查：上下游共享 >=2 个关键词视为互锁，否则标存疑供人工核对。 */
+function sharesKeywords(a: string, b: string): boolean {
+  const tok = (s: string) => new Set(s.toLowerCase().match(/[a-z]{3,}|[一-鿿]{2,}/g) ?? []);
+  const setA = tok(a);
+  const setB = tok(b);
+  let shared = 0;
+  for (const t of setA) if (setB.has(t)) shared += 1;
+  return shared >= 2;
+}
+
 export function PlanGenerator({ context, report, evidenceNotes, papers, draftConclusions, checkupSummary, reviewSummary, constraintSeed, restoredPlan, onPlanChange }: Props) {
   const available = useFunctionProbe();
   const [constraints, setConstraints] = useState<Record<string, string>>({});
@@ -178,6 +188,25 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [revised, setRevised] = useState(false);
+  const [showChain, setShowChain] = useState(false);
+
+  const chainLinks = useMemo(() => {
+    if (!plan) return [];
+    const s = plan.sections;
+    const cut = (t: string) => (t || "").slice(0, 60);
+    const rows = [
+      { label: "局限→想法", a: s.background, b: s.hypotheses },
+      { label: "想法→挑战", a: s.hypotheses, b: s.risks },
+      { label: "挑战→方法", a: s.risks, b: s.method },
+      { label: "方法→结果", a: s.method, b: `${s.experiments ?? ""} ${s.outcomes ?? ""}` },
+    ];
+    return rows.map((r) => ({
+      label: r.label,
+      src: cut(r.a),
+      dst: cut(r.b),
+      linked: sharesKeywords(r.a ?? "", r.b ?? ""),
+    }));
+  }, [plan]);
   // M6/M3 客户端校验结果：代猜的资源词与未核对的正文数字
   const [resourceWarnings, setResourceWarnings] = useState<string[]>([]);
   const [numberWarnings, setNumberWarnings] = useState<string[]>([]);
@@ -738,6 +767,46 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
               </figcaption>
               <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
                 {plan.chainAudit}
+              </p>
+            </figure>
+          ) : null}
+
+          {plan ? (
+            <figure className="figure-panel px-3 py-2.5">
+              <figcaption className="label-caps mb-1 flex items-center justify-between gap-2">
+                <span>逻辑链逐环对照（客户端互锁检查）</span>
+                <Button variant="ghost" size="sm" className="h-6" onClick={() => setShowChain((v) => !v)}>
+                  {showChain ? "收起" : "展开"}
+                </Button>
+              </figcaption>
+              {showChain ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="text-left text-muted-foreground">
+                        <th className="py-1 pr-2">环节</th>
+                        <th className="py-1 pr-2">上游摘录</th>
+                        <th className="py-1 pr-2">下游摘录</th>
+                        <th className="py-1">互锁</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {chainLinks.map((l) => (
+                        <tr key={l.label} className="border-t border-border align-top">
+                          <td className="whitespace-nowrap py-1 pr-2">{l.label}</td>
+                          <td className="py-1 pr-2 text-muted-foreground">{l.src || "（空）"}</td>
+                          <td className="py-1 pr-2 text-muted-foreground">{l.dst || "（空）"}</td>
+                          <td className="py-1">
+                            {l.linked ? <Badge variant="secondary">互锁</Badge> : <Badge variant="destructive">存疑</Badge>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                互锁 = 上下游共享 ≥2 个关键词（启发式）；「存疑」环请人工核对，本表不替代模型的 chainAudit。
               </p>
             </figure>
           ) : null}

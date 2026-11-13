@@ -8,6 +8,7 @@ import { RadarView } from "@/components/RadarView";
 import { LibraryView } from "@/components/LibraryView";
 import { PaperCard, paperEvidenceLevel } from "@/components/PaperCard";
 import { SessionArchive } from "@/components/SessionArchive";
+import { DemoGuide } from "@/components/DemoGuide";
 import type { CheckupSeed } from "@/components/FeasibilityChecker";
 import type { TopicCluster } from "@/lib/analysis/radar";
 import { buildDirectionContext } from "@/lib/ai/directions";
@@ -59,6 +60,7 @@ export default function App() {
   const [checkupState, setCheckupState] = useState<SavedCheckup | null>(null);
   const [reviewState, setReviewState] = useState<SavedReview | null>(null);
   const [constraintSeed, setConstraintSeed] = useState<{ text: string; token: number } | null>(null);
+  const [showDemo, setShowDemo] = useState(false);
 
   const goTo = (t: string) => {
     const g = groupOf(t);
@@ -201,6 +203,9 @@ export default function App() {
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setShowSettings((value) => !value)}>
               设置
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowDemo(true)}>
+              演示模式
             </Button>
           </div>
           {!query.trim() ? (
@@ -490,6 +495,20 @@ export default function App() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <DemoGuide
+        open={showDemo}
+        onOpenChange={setShowDemo}
+        onLoadSnapshot={handleSnapshot}
+        onSearch={(q) => {
+          setQuery(q);
+          setClusterFilter(null);
+          resetSessionOutputs();
+          void corpus.searchOnline(q, apiKey || undefined);
+          goTo("radar");
+        }}
+        goTo={goTo}
+      />
 
       <PaperCard
         paper={cardPaper}

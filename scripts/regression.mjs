@@ -1542,6 +1542,40 @@ if (extra.radar) {
 if (extra.metrics) testConfusionValidation(extra.metrics);
 if (extra.grounding) testNumberAudit(extra.grounding);
 
+// 导出头部必须带检索元数据（M7）：脱离站点仍可复现
+const exportMods = await loadModules([["exportmod", "lib/export.ts"]]);
+group("export-header-metadata", () => {
+  const { papersToMarkdown, papersToCsv } = exportMods.exportmod;
+  const report = {
+    job: { rawQuestion: "medical image segmentation", queryVariants: [], constraints: {}, sourcePlan: ["openalex"] },
+    sourceReports: [],
+    totalBeforeDedup: 10,
+    totalAfterDedup: 9,
+    removedByDedup: 1,
+    abstractCoverage: 80,
+    oaCoverage: 60,
+    limitations: ["样本框限制A"],
+    sampleFrame: "偏向性抽样框B",
+    fromCache: false,
+    degraded: false,
+    retrievedAt: "2026-11-13T00:00:00Z",
+  };
+  const paper = {
+    id: "p1", title: "T", year: 2024, citedByCount: 5, venue: "V", doi: "10.1/x",
+    authors: ["A"], authorCount: 1, keywords: ["k"], topics: [], abstract: null,
+    oaUrl: null, publisherUrl: null, oaStatus: "none",
+    provenance: { source: "openalex", sourceId: "W1", retrievedAt: "2026-11-13T00:00:00Z", query: "q", filter: "f", dedupKey: "doi:10.1/x", abstractAvailable: false, oaUrl: null },
+  };
+  const md = papersToMarkdown([paper], { title: "文献清单", report });
+  ok(md.includes("medical image segmentation"), "MD 头部含检索式");
+  ok(md.includes("2026-11-13"), "MD 头部含检索日期");
+  ok(md.includes("偏向性抽样框B"), "MD 头部含样本框");
+  ok(md.includes("样本框限制A"), "MD 头部含局限");
+  const csv = papersToCsv([paper], () => ({ query: report.job.rawQuestion, sampleFrame: report.sampleFrame }));
+  ok(csv.split("\n")[0].includes("query"), "CSV 含 query 列");
+  ok(csv.includes("medical image segmentation"), "CSV 行含检索式");
+});
+
 if (failures.length > 0) {
   for (const { name, error } of failures) {
     console.error(`FAIL ${name}`);
