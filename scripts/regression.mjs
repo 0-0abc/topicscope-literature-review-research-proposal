@@ -7,6 +7,10 @@
  *   5. 存档恢复合并      hooks/useEvidenceStore.ts mergeEvidenceNotes（纯函数，不调用 hook）
  *   6. handler 服务端检索 functions/handler.ts     status / search（OpenAlex 两批 + S2 合并、
  *                                                   429 退避重试、12h 共享缓存、Crossref 降级）
+ *   7. 稀疏簇判定        lib/analysis/radar.ts     analyzeTopics：4 篇 / 占比<5% 不得判 mature
+ *   8. 阈值稳定性        lib/analysis/radar.ts     emerging/saturated 阈值 ±20% 扰动不翻转
+ *   9. 输入校验          lib/metrics/classification.ts validateConfusionMatrix
+ *  10. 数字回查          lib/ai/grounding.ts       auditTextNumbers / buildNumericWhitelist
  *
  * 运行：node scripts/regression.mjs
  * 用 esbuild build API（write:false, bundle:true, platform:'node', format:'esm'，
@@ -16,7 +20,7 @@
  * 不写 dist、不跑 vite build；临时目录用完即删。
  */
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31,6 +35,17 @@ const ENTRIES = [
   ["plan", "lib/ai/plan.ts"],
   ["review", "lib/ai/review.ts"],
   ["evidence", "hooks/useEvidenceStore.ts"],
+];
+
+/**
+ * 新增被测入口：逐个独立打包。
+ * radar.ts 等文件可能被并行修改（写到一半时语法不完整），
+ * 独立打包 + 捕获失败，保证上面 5 个入口的既有断言照常执行。
+ */
+const EXTRA_ENTRIES = [
+  ["radar", "lib/analysis/radar.ts"],
+  ["metrics", "lib/metrics/classification.ts"],
+  ["grounding", "lib/ai/grounding.ts"],
 ];
 
 // ---------------------------------------------------------------------------
@@ -58,10 +73,10 @@ function group(name, fn) {
 // ---------------------------------------------------------------------------
 // 打包：内存产物 -> 临时 .mjs -> 动态 import（react 会被一并打包，不调用 hook）
 // ---------------------------------------------------------------------------
-async function loadModules() {
+async function loadModules(entries = ENTRIES) {
   const result = await build({
     absWorkingDir: root,
-    entryPoints: ENTRIES.map(([name, file]) => ({ in: path.join(root, file), out: name })),
+    entryPoints: entries.map(([name, file]) => ({ in: path.join(root, file), out: name })),
     outdir: "regression-out", // write:false，仅用于计算产物路径，不落盘到项目
     bundle: true,
     write: false,
@@ -84,8 +99,28 @@ async function loadModules() {
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
-  for (const [name] of ENTRIES) {
+  for (const [name] of entries) {
     if (!mods[name]) throw new Error(`打包产物缺少模块: ${name}`);
+  }
+  return mods;
+}
+
+/**
+ * 逐个加载新增入口：某个文件正被并行改坏时只影响它自己，
+ * 失败原因记进 failures，既有断言不受牵连。
+ */
+async function loadExtraModules() {
+  const mods = {};
+  for (const entry of EXTRA_ENTRIES) {
+    const [name] = entry;
+    try {
+      Object.assign(mods, await loadModules([entry]));
+    } catch (error) {
+      failures.push({
+        name: `load: ${entry[1]} 打包失败（该文件可能正被并行修改）`,
+        error,
+      });
+    }
   }
   return mods;
 }
@@ -1051,6 +1086,443 @@ async function testHandlerServer() {
 }
 
 // ---------------------------------------------------------------------------
+// 7. 稀疏簇判定 lib/analysis/radar.ts
+//    行为断言：size < 10 或 sizeShare < 0.05 的簇不得判 mature（稳定产出）。
+//    radar.ts 正在被并行修改，这里只断言行为，不锁定具体档位名。
+// ---------------------------------------------------------------------------
+
+/**
+ * 稀疏簇夹具：100 篇论文分成三个词汇互不重叠的主题组（48 / 48 / 4）。
+ * 第三组只有 4 篇、占比 4%（< 5%），且全部是早期年份（recentShare = 0），
+ * 因此不会走 emerging / saturated 分支，专门命中「小样本 + 低占比」判定。
+ */
+function makeSparseCorpus() {
+  const groups = [
+    {
+      terms: ["graph", "molecule", "protein", "binding"],
+      variants: ["docking", "screening", "cohort", "benchmark"],
+      count: 48,
+      years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
+    },
+    {
+      terms: ["federated", "privacy", "client", "encryption"],
+      variants: ["aggregation", "uplink", "differential", "secure"],
+      count: 48,
+      years: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
+    },
+    {
+      terms: ["quantum", "annealing", "qubit", "superconducting"],
+      variants: ["schedule", "embedding", "noise", "coupling"],
+      count: 4,
+      years: [2015, 2016, 2017, 2018],
+    },
+  ];
+
+  const papers = [];
+  let serial = 0;
+  for (const group of groups) {
+    for (let i = 0; i < group.count; i++) {
+      serial += 1;
+      const variant = group.variants[i % group.variants.length];
+      papers.push(
+        makePaper({
+          id: `https://openalex.org/W${serial}`,
+          title: `${group.terms.join(" ")} ${variant}`,
+          keywords: [...group.terms],
+          year: group.years[i % group.years.length],
+          citedByCount: 5 + (serial % 40),
+          venue: `Venue ${serial % 5}`,
+          provenance: {
+            sourceId: `W${serial}`,
+            dedupKey: `id:openalex:W${serial}`,
+            abstractAvailable: false,
+          },
+        }),
+      );
+    }
+  }
+  return papers;
+}
+
+/** 找出夹具里那个 4 篇 / 占比<5% 的稀疏簇。 */
+function findSparseCluster(radarResult) {
+  return radarResult.clusters.find((c) => c.size === 4 && c.sizeShare < 0.05) ?? null;
+}
+
+function testSparseClusterVerdict({ analyzeTopics, VERDICT_META }) {
+  const papers = makeSparseCorpus();
+  const first = analyzeTopics(papers);
+  const sparse = findSparseCluster(first);
+
+  group("radar: 夹具产出 4 篇 / 占比<5% 的稀疏簇", () => {
+    eq(papers.length, 100);
+    ok(sparse !== null, "夹具应聚出一个 size=4 且 sizeShare<0.05 的簇");
+    eq(sparse.size, 4);
+    ok(sparse.sizeShare < 0.05, `稀疏簇占比应 <5%，实际 ${sparse.sizeShare}`);
+    ok(sparse.recentShare < 0.6, "稀疏簇近期占比应 <0.6，确保不走 emerging 分支");
+    ok(sparse.sizeShare < 0.12, "稀疏簇占比应 <0.12，确保不走 saturated 分支");
+  });
+
+  group("radar: 稀疏簇不得判 mature / 稳定产出（依赖 radar.ts 并行修复）", () => {
+    ok(
+      Object.prototype.hasOwnProperty.call(VERDICT_META, sparse.verdict),
+      `verdict 必须是已定义档位，实际 ${sparse.verdict}`,
+    );
+    ok(
+      sparse.verdict !== "mature",
+      `size=4 / 占比 ${(sparse.sizeShare * 100).toFixed(1)}% 的稀疏簇被判 mature（稳定产出）；` +
+        "证据不足档应为 insufficient / gap 一类，需 lib/analysis/radar.ts 的并行修复落地",
+    );
+    ok(
+      sparse.verdict !== "saturated",
+      `稀疏簇被判 saturated（高密度成熟），实际 ${sparse.verdict}`,
+    );
+    ok(
+      typeof sparse.verdictReason === "string" && sparse.verdictReason.length > 0,
+      "稀疏簇必须给出判定理由",
+    );
+  });
+
+  group("radar: 全语料不变量——所有 size<10 或占比<5% 的簇都不判 mature", () => {
+    const offenders = first.clusters
+      .filter((c) => c.size < 10 || c.sizeShare < 0.05)
+      .filter((c) => c.verdict === "mature" || c.verdict === "saturated");
+    eq(
+      offenders.map((c) => `${c.name}:${c.size}:${c.verdict}`),
+      [],
+      "存在稀疏簇被判 mature/saturated",
+    );
+  });
+
+  group("radar: 同一批文献重复分析产出稳定（判定不漂移）", () => {
+    const second = analyzeTopics(papers);
+    eq(
+      second.clusters.map((c) => [c.size, c.verdict]),
+      first.clusters.map((c) => [c.size, c.verdict]),
+      "两次 analyzeTopics 的簇规模与判定应完全一致",
+    );
+    eq(findSparseCluster(second)?.verdict ?? null, sparse.verdict);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 8. 阈值稳定性：emerging/saturated 阈值（0.1 / 0.12 / 0.6）±20% 扰动
+//    做法：读 radar.ts 源码，在内存里替换阈值字面量后重新打包（不改源文件），
+//    对同一批稀疏簇夹具跑 analyzeTopics，断言判定不翻转并统计翻转数。
+// ---------------------------------------------------------------------------
+const RADAR_SOURCE_FILE = path.join(root, "lib/analysis/radar.ts");
+
+/** 每个阈值给出若干候选写法（内联字面量 / 具名常量），兼容并行重构。
+ *  捕获组必须包含标识符与运算符，替换时只换掉末尾的数字字面量。 */
+const THRESHOLD_SPECS = [
+  {
+    key: "emerging.sizeShare",
+    base: 0.1,
+    patterns: [
+      /(sizeShare\s*<\s*)0\.1(?![\d])/g,
+      /(EMERGING[A-Z_]*(?:SHARE|SIZE)[A-Z_]*\s*=\s*)0\.1(?![\d])/g,
+    ],
+  },
+  {
+    key: "saturated.sizeShare",
+    base: 0.12,
+    patterns: [
+      /(sizeShare\s*>=\s*)0\.12(?![\d])/g,
+      /(SATURATED[A-Z_]*(?:SHARE|SIZE)[A-Z_]*\s*=\s*)0\.12(?![\d])/g,
+    ],
+  },
+  {
+    key: "emerging.recentShare",
+    base: 0.6,
+    patterns: [
+      /(recentShare\s*>=\s*)0\.6(?![\d])/g,
+      /(EMERGING[A-Z_]*RECENT[A-Z_]*\s*=\s*)0\.6(?![\d])/g,
+    ],
+  },
+];
+
+/** 把源码里的某个阈值替换成扰动值；未匹配到任何写法时返回 null。 */
+function perturbThreshold(source, spec, value) {
+  for (const pattern of spec.patterns) {
+    pattern.lastIndex = 0;
+    if (!pattern.test(source)) continue;
+    pattern.lastIndex = 0;
+    return source.replace(pattern, (_match, prefix) => `${prefix}${value}`);
+  }
+  return null;
+}
+
+/** 内存打包一份（可能被扰动过的）radar 源码并 import。 */
+async function loadRadarSource(contents, tmpDir, name) {
+  const result = await build({
+    absWorkingDir: root,
+    stdin: {
+      contents,
+      resolveDir: path.join(root, "lib/analysis"),
+      sourcefile: "radar.ts",
+      loader: "ts",
+    },
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "esm",
+    target: "node18",
+    alias: { "@": root },
+    logLevel: "silent",
+  });
+  const dest = path.join(tmpDir, `${name}.mjs`);
+  await writeFile(dest, result.outputFiles[0].contents);
+  return import(pathToFileURL(dest).href);
+}
+
+async function testThresholdStability({ analyzeTopics }) {
+  const papers = makeSparseCorpus();
+  const baselineSparse = findSparseCluster(analyzeTopics(papers));
+  const baselineVerdict = baselineSparse ? baselineSparse.verdict : "(missing)";
+  const source = await readFile(RADAR_SOURCE_FILE, "utf8");
+
+  const stats = {
+    planned: 0,
+    applied: 0,
+    flips: 0,
+    skipped: [],
+    baseline: baselineVerdict,
+    details: [],
+  };
+
+  const tmp = await mkdtemp(path.join(tmpdir(), "qorder-radar-threshold-"));
+  try {
+    for (const spec of THRESHOLD_SPECS) {
+      for (const factor of [0.8, 1.2]) {
+        const value = Number((spec.base * factor).toFixed(6));
+        const label = `${spec.key} ${spec.base}→${value}（${factor > 1 ? "+" : "−"}20%）`;
+        stats.planned += 1;
+
+        const patched = perturbThreshold(source, spec, value);
+        if (patched === null || patched === source) {
+          stats.skipped.push(label);
+          continue;
+        }
+
+        let variant;
+        try {
+          variant = await loadRadarSource(
+            patched,
+            tmp,
+            `radar-${spec.key.replace(/\./g, "-")}-${factor}`,
+          );
+        } catch (error) {
+          // 扰动后的源码必须仍能解析；失败说明替换写法有误或源文件正被并行改坏。
+          failures.push({ name: `stability: ${label} 扰动源码打包失败`, error });
+          stats.skipped.push(`${label}（打包失败）`);
+          continue;
+        }
+        const sparse = findSparseCluster(variant.analyzeTopics(papers));
+        const verdict = sparse ? sparse.verdict : "(missing)";
+        const flipped = verdict !== baselineVerdict;
+        stats.applied += 1;
+        if (flipped) stats.flips += 1;
+        stats.details.push({ label, verdict, flipped });
+
+        group(`stability: ${label} 稀疏簇判定不翻转`, () => {
+          ok(sparse !== null, `扰动后仍应聚出同一个稀疏簇（${label}）`);
+          eq(
+            verdict,
+            baselineVerdict,
+            `阈值扰动 ${label} 后稀疏簇判定翻转：${baselineVerdict} → ${verdict}`,
+          );
+        });
+      }
+    }
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+
+  group("stability: 扰动确实生效（非空跑）", () => {
+    ok(stats.applied > 0, `没有任何阈值写法被匹配到，跳过: ${stats.skipped.join(", ")}`);
+    eq(stats.flips, 0, `稀疏簇判定在阈值扰动下翻转 ${stats.flips} 次`);
+    eq(stats.details.filter((d) => d.flipped).length, 0);
+  });
+
+  // 供报告使用的稳定性统计
+  console.log(
+    `stability: 阈值扰动 ${stats.applied}/${stats.planned} 组生效` +
+      `（0.1 / 0.12 / 0.6 × ±20%），稀疏簇判定翻转 ${stats.flips} 次，` +
+      `基线 verdict=${stats.baseline}` +
+      (stats.skipped.length > 0 ? `，未匹配跳过: ${stats.skipped.join(", ")}` : ""),
+  );
+  for (const detail of stats.details) {
+    console.log(
+      `  - ${detail.label}: verdict=${detail.verdict}${detail.flipped ? "（翻转）" : ""}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. 输入校验 lib/metrics/classification.ts validateConfusionMatrix
+// ---------------------------------------------------------------------------
+function testConfusionValidation({ validateConfusionMatrix }) {
+  group("validate: 合法二分类整数计数通过", () => {
+    const result = validateConfusionMatrix({ tp: 50, fp: 10, fn: 25, tn: 915 });
+    eq(result.ok, true);
+    eq(result.errors, []);
+  });
+
+  group("validate: 负数判非法", () => {
+    const result = validateConfusionMatrix({ tp: -1, fp: 10, fn: 25, tn: 915 });
+    eq(result.ok, false);
+    ok(result.errors.length > 0, "必须给出行内错误原因");
+    ok(
+      result.errors.some((e) => e.includes("TP") && e.includes("负数")),
+      `错误应指明 TP 为负，实际: ${result.errors.join(" / ")}`,
+    );
+  });
+
+  group("validate: 小数判非法", () => {
+    const result = validateConfusionMatrix({ tp: 50.5, fp: 10, fn: 25, tn: 915 });
+    eq(result.ok, false);
+    ok(
+      result.errors.some((e) => e.includes("整数")),
+      `错误应指明必须是整数，实际: ${result.errors.join(" / ")}`,
+    );
+  });
+
+  group("validate: N=0 判非法", () => {
+    const result = validateConfusionMatrix({ tp: 0, fp: 0, fn: 0, tn: 0 });
+    eq(result.ok, false);
+    ok(
+      result.errors.some((e) => e.includes("N")),
+      `错误应指明总数 N 必须大于 0，实际: ${result.errors.join(" / ")}`,
+    );
+  });
+
+  group("validate: NaN / 非数字判非法", () => {
+    eq(validateConfusionMatrix({ tp: NaN, fp: 1, fn: 1, tn: 1 }).ok, false);
+    eq(validateConfusionMatrix({ tp: Infinity, fp: 1, fn: 1, tn: 1 }).ok, false);
+    eq(validateConfusionMatrix({ tp: "50", fp: 1, fn: 1, tn: 1 }).ok, false);
+    eq(validateConfusionMatrix(null).ok, false);
+  });
+
+  group("validate: 四个计数各自被检查", () => {
+    for (const key of ["tp", "fp", "fn", "tn"]) {
+      const counts = { tp: 1, fp: 1, fn: 1, tn: 1 };
+      counts[key] = -2;
+      eq(validateConfusionMatrix(counts).ok, false, `${key} 为负应判非法`);
+      const decimal = { tp: 1, fp: 1, fn: 1, tn: 1 };
+      decimal[key] = 1.5;
+      eq(validateConfusionMatrix(decimal).ok, false, `${key} 为小数应判非法`);
+    }
+  });
+
+  group("validate: 合法混淆矩阵通过", () => {
+    const result = validateConfusionMatrix({
+      labels: ["A", "B", "C"],
+      m: [
+        [8, 1, 1],
+        [1, 7, 2],
+        [1, 2, 8],
+      ],
+    });
+    eq(result.ok, true);
+    eq(result.errors, []);
+  });
+
+  group("validate: 矩阵负数 / 小数 / 全零判非法", () => {
+    eq(validateConfusionMatrix({ labels: ["A", "B"], m: [[-1, 0], [0, 1]] }).ok, false);
+    eq(validateConfusionMatrix({ labels: ["A", "B"], m: [[1.5, 0], [0, 1]] }).ok, false);
+    const zero = validateConfusionMatrix({ labels: ["A", "B"], m: [[0, 0], [0, 0]] });
+    eq(zero.ok, false);
+    ok(zero.errors.some((e) => e.includes("N")), "全零矩阵应提示 N 必须大于 0");
+  });
+
+  group("validate: 矩阵形状不合法判非法", () => {
+    eq(validateConfusionMatrix({ labels: ["A", "B"], m: [[1, 0], [0]] }).ok, false);
+    eq(validateConfusionMatrix({ labels: ["A", "B"], m: [[1, 0]] }).ok, false);
+    eq(validateConfusionMatrix({ labels: [], m: [] }).ok, false);
+  });
+
+  group("validate: 边界合法输入通过", () => {
+    eq(validateConfusionMatrix({ tp: 1, fp: 0, fn: 0, tn: 0 }).ok, true);
+    eq(validateConfusionMatrix({ tp: 0, fp: 0, fn: 0, tn: 5 }).ok, true);
+    eq(validateConfusionMatrix({ labels: ["A"], m: [[3]] }).ok, true);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 10. 数字回查 lib/ai/grounding.ts auditTextNumbers / buildNumericWhitelist
+// ---------------------------------------------------------------------------
+function makeGroundingContext(lift) {
+  return {
+    query: "医学影像分割",
+    corpus: {
+      size: 100,
+      yearRange: [2015, 2024],
+      clusterCount: 3,
+      abstractCoverage: 80,
+      oaCoverage: 40,
+    },
+    clusters: [
+      {
+        name: "quantum annealing",
+        verdict: "insufficient",
+        size: 4,
+        sizeShare: 4,
+        yearRange: [2015, 2018],
+        medianYear: 2016.5,
+        recentShare: 0,
+        fiveYearShare: 0,
+        citationMedian: 12,
+        crowding: 8,
+        reason: "样本内只有 4 篇，证据不足",
+        terms: ["quantum", "annealing"],
+        venues: [],
+        papers: [{ title: "Qubit annealing", year: 2016, venue: null, citedByCount: 12 }],
+        pairs: [{ a: "quantum", b: "annealing", lift, count: 3 }],
+      },
+    ],
+    pairs: [{ a: "graph", b: "molecule", lift, count: 7 }],
+    evidence: [
+      {
+        id: "cluster:quantum-annealing:size",
+        kind: "cluster",
+        label: "方向规模",
+        value: "4 篇",
+        origin: "检索快照",
+      },
+    ],
+  };
+}
+
+function testNumberAudit({ auditTextNumbers, buildNumericWhitelist }) {
+  group("grounding: 白名单只有 2.39 时「提升度 2.8」判未核对", () => {
+    eq(auditTextNumbers("提升度 2.8", [2.39]), ["2.8"]);
+  });
+
+  group("grounding: 白名单含 2.8 时「提升度 2.8」通过", () => {
+    eq(auditTextNumbers("提升度 2.8", [2.8]), []);
+  });
+
+  group("grounding: buildNumericWhitelist 收集共现提升度（2.39）", () => {
+    const whitelist = buildNumericWhitelist(makeGroundingContext(2.39));
+    ok(whitelist.includes(2.39), "白名单应包含送进模型的 lift=2.39");
+    ok(!whitelist.includes(2.8), "白名单不应凭空出现 2.8");
+    eq(auditTextNumbers("提升度 2.8", whitelist), ["2.8"]);
+  });
+
+  group("grounding: buildNumericWhitelist 收集共现提升度（2.8）", () => {
+    const whitelist = buildNumericWhitelist(makeGroundingContext(2.8));
+    ok(whitelist.includes(2.8), "白名单应包含送进模型的 lift=2.8");
+    eq(auditTextNumbers("提升度 2.8", whitelist), []);
+  });
+
+  group("grounding: 空上下文与多数字正文", () => {
+    eq(buildNumericWhitelist(null), []);
+    eq(auditTextNumbers("提升度 2.8，占比 7.4%", [2.8]), ["7.4"]);
+    eq(auditTextNumbers("没有任何统计数字的正文", [2.8]), []);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 const mods = await loadModules();
@@ -1061,6 +1533,14 @@ testPlan(mods.plan);
 testReview(mods.review);
 testEvidenceMerge(mods.evidence);
 await testHandlerServer();
+
+const extra = await loadExtraModules();
+if (extra.radar) {
+  testSparseClusterVerdict(extra.radar);
+  await testThresholdStability(extra.radar);
+}
+if (extra.metrics) testConfusionValidation(extra.metrics);
+if (extra.grounding) testNumberAudit(extra.grounding);
 
 if (failures.length > 0) {
   for (const { name, error } of failures) {

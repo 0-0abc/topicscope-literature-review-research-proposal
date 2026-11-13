@@ -286,11 +286,65 @@ export function parseFeasibility(value: unknown): FeasibilityResult | null {
   };
 }
 
+/** 归一化标题：小写并去掉空白与标点，便于宽松比对。 */
+function normalizeTitle(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "");
+}
+
+/**
+ * M6：致命缺陷/新颖性核对里引用的论文必须能在 refs 清单里找到，
+ * 否则记一条完整性警告（引用无法回查）。
+ */
+function auditCitedPapers(result: FeasibilityResult, refs: FeasibilityRef[]): string[] {
+  const notes: string[] = [];
+  const seen = new Set<string>();
+  const push = (note: string) => {
+    if (!seen.has(note)) {
+      seen.add(note);
+      notes.push(note);
+    }
+  };
+  const refTitles = refs.map(({ paper }) => normalizeTitle(paper.title)).filter(Boolean);
+  const texts = [
+    ...result.flaws.flatMap((flaw) => [flaw.detail, flaw.defense]),
+    result.verdict.reason,
+    ...result.dimensions.map((dim) => dim.evidence),
+  ];
+  for (const text of texts) {
+    if (!text) continue;
+    // 编号引用 [n] 必须落在核对文献清单范围内
+    const bracketRe = /\[(\d{1,2})\]/g;
+    let match: RegExpExecArray | null;
+    while ((match = bracketRe.exec(text)) !== null) {
+      const n = Number(match[1]);
+      if (n < 1 || n > refs.length) {
+        push(`引用编号 [${n}] 超出新颖性核对文献清单（共 ${refs.length} 篇），无法回查。`);
+      }
+    }
+    // 书名号/引号里的论文标题必须能在清单里找到（过短的按概念词放过）
+    const quoteRe = /《([^》]{6,120})》|「([^」]{6,120})」|“([^”]{6,120})”/g;
+    while ((match = quoteRe.exec(text)) !== null) {
+      const candidate = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+      const norm = normalizeTitle(candidate);
+      if (norm.length < 8) continue;
+      const matched = refTitles.some((title) => title.includes(norm) || norm.includes(title));
+      if (!matched) {
+        push(`引用的论文「${candidate.slice(0, 60)}」不在新颖性核对文献清单中，无法回查。`);
+      }
+    }
+  }
+  return notes.slice(0, 4);
+}
+
 /**
  * 完整性自检（对应 idea-evaluator 的 Integrity gate）：
  * 结论必须与评分、缺陷一致，不一致就降级并明示原因。
+ * 传入 refs 时额外核对：正文引用的论文必须出现在核对文献清单里。
  */
-export function integrityCheck(result: FeasibilityResult): { decision: Decision; notes: string[] } {
+export function integrityCheck(
+  result: FeasibilityResult,
+  refs?: FeasibilityRef[],
+): { decision: Decision; notes: string[] } {
   const notes: string[] = [];
   let decision = result.verdict.decision;
   const hasCritical = result.flaws.some((f) => f.severity === "critical");
@@ -308,6 +362,7 @@ export function integrityCheck(result: FeasibilityResult): { decision: Decision;
       notes.push(`「${DIMENSION_META[dim.key].label}」维度未给出依据却高于默认 5 分，该分数不可采信。`);
     }
   }
+  if (refs) notes.push(...auditCitedPapers(result, refs));
   return { decision, notes };
 }
 
@@ -324,7 +379,7 @@ export function feasibilityToMarkdown(
   report: SearchReport | null,
   model?: string | null,
 ): string {
-  const { decision, notes } = integrityCheck(result);
+  const { decision, notes } = integrityCheck(result, refs);
   const lines: string[] = [`# 选题体检报告：${result.firstImpression.story.slice(0, 40) || "未命名想法"}`, ""];
   if (report) {
     lines.push(

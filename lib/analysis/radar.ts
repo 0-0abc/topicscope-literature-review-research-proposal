@@ -21,14 +21,14 @@ export const VERDICT_META: Record<
     tone: "text-foreground",
     summary: "样本内有持续研究，但仍可能通过数据、任务设定或评测设计形成差异。",
     cannotConclude:
-      "不能据此断定这个方向缺少研究空间：占比高可能来自检索式的偏好，而不是领域真实密度。",
+      "不能据此断定这个方向缺少研究空间：样本内占比可能来自检索式的偏好，而不是领域真实密度。",
   },
   emerging: {
     label: "增长窗口",
     tone: "text-foreground",
     summary: "当前检索样本量不大，但样本内近期占比高，值得进一步核查。",
     cannotConclude:
-      "样本内近期占比高，固定按年采样的样本不能证明真实发文增长；也不能断定这个方向尚未被其他数据库或未公开论文覆盖，增长是否持续需独立检索验证。",
+      "样本内近期占比高，当前样本框（见检索快照）不能证明真实发文增长；也不能断定这个方向尚未被其他数据库或未公开论文覆盖，增长是否持续需独立检索验证。",
   },
   gap: {
     label: "当前检索未观察到",
@@ -38,11 +38,11 @@ export const VERDICT_META: Record<
       "不能据此断定这是真实空白：可能是检索式用词、数据库覆盖或发表渠道不同造成的召回不足。",
   },
   insufficient: {
-    label: "证据不足",
+    label: "样本内稀疏 · 证据不足",
     tone: "text-foreground",
-    summary: "摘要或来源覆盖不够，暂不适合做强判断。",
+    summary: "样本内论文数或占比过低（size < 10 或占比 < 5%），证据不足，暂不适合做强判断。",
     cannotConclude:
-      "不能据此判断方向真实密度：当前材料只有元数据或部分摘要，结论需要补全文后再下。",
+      "不能据此判断方向真实密度或冷热：样本内材料太少，可能只是检索式或数据库覆盖不足，需扩大检索并补全文后再下结论。",
   },
 };
 
@@ -55,7 +55,7 @@ export interface TopicCluster {
   sizeShare: number;
   yearRange: [number, number];
   medianYear: number;
-  /** 样本内近三年论文比例（固定按年采样的口径，不能证明真实发文增长） */
+  /** 样本内近三年论文比例（当前样本框口径，见检索快照；不能证明真实发文增长） */
   recentShare: number;
   /** 样本内近五年论文比例 */
   fiveYearShare: number;
@@ -64,6 +64,10 @@ export interface TopicCluster {
   crowding: number;
   verdict: CoverageVerdict;
   verdictReason: string;
+  /** 命中的判定规则分支与阈值，供人工核对（如「size 4 < 10 → 样本内稀疏」） */
+  ruleTrace: string;
+  /** 按该簇实际 sizeShare/recentShare 动态生成的边界说明；sizeShare < 0.1 时不得出现「占比高」 */
+  cannotConclude: string;
   /** 当前材料能支持的强度说明 */
   coverageNote: string;
   /** 材料覆盖不足（摘要覆盖率低），判定只能当线索 */
@@ -102,6 +106,33 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/**
+ * 按簇实际占比动态生成「不能推出什么」：
+ * sizeShare < 0.1 的簇绝不出现「占比高」字样，也不假设抽样方式（样本框见检索快照）。
+ */
+function buildCannotConclude(
+  verdict: CoverageVerdict,
+  sizeShare: number,
+  recentShare: number,
+): string {
+  const sizePct = (sizeShare * 100).toFixed(1);
+  const recentPct = (recentShare * 100).toFixed(0);
+  switch (verdict) {
+    case "saturated":
+      return `样本内占比 ${sizePct}% 只反映当前检索样本；不能据此断定这个方向已经没有价值：换成新任务设定、新数据或新评测口径，仍然可能有空间。`;
+    case "mature":
+      return sizeShare >= 0.1
+        ? `不能据此断定这个方向缺少研究空间：样本内占比 ${sizePct}% 可能来自检索式的偏好，而不是领域真实密度。`
+        : `样本内占比仅 ${sizePct}%，不能据此断定这个方向缺少研究空间或真实冷门；占比低可能只是当前样本框（见检索快照）的召回偏好，需独立检索验证。`;
+    case "emerging":
+      return `样本内近三年占比 ${recentPct}%，但当前样本框（见检索快照）不能证明真实发文增长；也不能断定这个方向尚未被其他数据库或未公开论文覆盖，增长是否持续需独立检索验证。`;
+    case "gap":
+      return "不能据此断定这是真实空白：可能是检索式用词、数据库覆盖或发表渠道不同造成的召回不足。";
+    case "insufficient":
+      return `样本内占比仅 ${sizePct}%、样本稀疏，不能据此判断方向真实密度或冷热；需扩大检索、补全文后再下结论。`;
+  }
 }
 
 export function analyzeTopics(papers: Paper[]): RadarResult {
@@ -209,24 +240,32 @@ export function analyzeTopics(papers: Paper[]): RadarResult {
         venueConcentration * 30,
     );
 
+    const sizePct = (sizeShare * 100).toFixed(1);
+    const recentPct = (recentShare * 100).toFixed(0);
     let verdict: CoverageVerdict;
     let verdictReason: string;
-    if (size <= 3) {
-      verdict = "gap";
-      verdictReason = `当前检索样本内只有 ${size} 篇命中，属于当前检索样本未观察到；可能是真实空白，也可能是检索式没覆盖到，需独立检索验证。`;
+    let ruleTrace: string;
+    if (size < 10 || sizeShare < 0.05) {
+      verdict = "insufficient";
+      const hits: string[] = [];
+      if (size < 10) hits.push(`size ${size} < 10`);
+      if (sizeShare < 0.05) hits.push(`占比 ${sizePct}% < 5%`);
+      ruleTrace = `${hits.join(" 且 ")} → 样本内稀疏 · 证据不足`;
+      verdictReason = `样本内仅 ${size} 篇、占比 ${sizePct}%，样本内稀疏、证据不足；不能据此判断方向冷热，需扩大检索或补材料后再判断。`;
     } else if (sizeShare < 0.1 && recentShare >= 0.6) {
       verdict = "emerging";
-      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%，且样本内 ${(recentShare * 100).toFixed(0)}% 的论文集中在 ${recentThreshold}–${maxYear} 年；样本内近期占比高，固定按年采样的样本不能证明真实发文增长，需独立检索验证。`;
+      ruleTrace = `占比 ${sizePct}% < 10% 且近三年 ${recentPct}% ≥ 60% → 增长窗口`;
+      verdictReason = `样本内占比 ${sizePct}%，且样本内 ${recentPct}% 的论文集中在 ${recentThreshold}–${maxYear} 年；当前样本框（见检索快照）内近期占比高，不能证明真实发文增长，需独立检索验证。`;
     } else if (sizeShare >= 0.12 && medianYear <= maxYear - 4 && recentShare <= 0.35) {
       verdict = "saturated";
-      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%、中位发表年份 ${medianYear}，样本内早期工作较多，${recentThreshold} 年后新增很少。`;
-    } else if (sizeShare < 0.05) {
-      verdict = "mature";
-      verdictReason = `样本内占比仅 ${(sizeShare * 100).toFixed(1)}%、共 ${size} 篇，当前检索样本未观察到密集工作；样本内占比低不等于真实领域冷门。`;
+      ruleTrace = `占比 ${sizePct}% ≥ 12% 且中位年份 ${medianYear} ≤ ${maxYear - 4} 且近三年 ${recentPct}% ≤ 35% → 高密度成熟方向`;
+      verdictReason = `样本内占比 ${sizePct}%、中位发表年份 ${medianYear}，样本内早期工作较多，${recentThreshold} 年后新增很少。`;
     } else {
       verdict = "mature";
-      verdictReason = `样本内占比 ${(sizeShare * 100).toFixed(1)}%，中位发表年份 ${medianYear}，样本内属于有稳定产出的常规方向。`;
+      ruleTrace = `size ${size} ≥ 10 且占比 ${sizePct}% ≥ 5%，未命中增长窗口与高密度条件 → 稳定产出方向`;
+      verdictReason = `样本内占比 ${sizePct}%，中位发表年份 ${medianYear}，样本内属于有稳定产出的常规方向。`;
     }
+    const cannotConclude = buildCannotConclude(verdict, sizeShare, recentShare);
 
     const topPapers = [...members]
       .sort((a, b) => b.citedByCount - a.citedByCount || b.year - a.year)
@@ -263,6 +302,8 @@ export function analyzeTopics(papers: Paper[]): RadarResult {
       crowding,
       verdict,
       verdictReason,
+      ruleTrace,
+      cannotConclude,
       coverageNote,
       evidenceWeak: abstractCoverage < 50,
       topVenues,

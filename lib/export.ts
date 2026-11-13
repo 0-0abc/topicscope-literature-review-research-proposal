@@ -67,10 +67,17 @@ export function papersToCsv(
 
 export function papersToMarkdown(
   papers: Paper[],
-  options: { title?: string; note?: string; clusterOf?: (paper: Paper) => string | undefined } = {},
+  options: {
+    title?: string;
+    note?: string;
+    clusterOf?: (paper: Paper) => string | undefined;
+    /** 检索快照：注入头部，保证导出脱离站点仍可复现 */
+    report?: SearchReport | null;
+  } = {},
 ): string {
   const lines: string[] = [];
   if (options.title) lines.push(`# ${options.title}`, "");
+  if (options.report) lines.push(searchReportToMarkdown(options.report), "");
   if (options.note) lines.push(options.note, "");
   lines.push(`共 ${papers.length} 篇，按被引次数从高到低排列。`, "");
 

@@ -52,7 +52,7 @@ const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读�
 硬性约束：
 1. 只能使用用户给出的 JSON 数据推理，不得引入数据之外的文献、作者、期刊或数字。
 2. 结论必须绑定 evidenceIds（只能从用户提供的 evidence 列表里挑现成的 ID）。
-3. 用户没给的约束不要替他猜，写进 missing（待补充条件）。
+3. 用户没给的约束不要替他猜，写进 missing（待补充条件）。constraints 里为 null 或缺省的字段（如 compute/timeline/datasets/object/task），禁止在方案任何章节写入具体 GPU 型号、具体周数/月数、具体数据集名称；这些只能作为待补充项写进 missing，不得臆造一个看似具体的值。
 4. 不能把"结合 A 和 B"直接写成创新性结论，必须说明任务差异、数据差异、评测差异或机制假设差异。
 5. 失败判据必须写清楚：什么结果算假设不成立。
 6. 每个 section 控制在 150 字以内，要点式，不要写长段落；不要重复同一句话。
@@ -60,6 +60,7 @@ const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读�
 8. 若输入带 verifiedEvidence（用户逐字段人工核对过的论文内容），优先采信它而不是你的推测；在背景/方法/基线/指标等章节引用时注明来自哪篇论文的哪个核对字段；verifiedEvidence 为空时不要假装有人工核对内容。
 9. 若输入带 draftConclusions（用户在研究对话中认可的结论草稿），把它们当作设计前提融进对应章节；与统计或核对证据冲突时，以后者为准并写明冲突。
 10. 若输入带 checkupSummary / reviewSummary（前置选题体检 / 文献综述的结论摘要），把它们当作已完成的分析前提：方案的问题定位、新颖性边界与相关工作应与之衔接；若你的判断与摘要冲突，写明冲突与理由，不要直接忽略。
+11. 第 14 节 references 必须用 context.clusters[].papers 里真实出现过的论文填充（标题+年份+被引），第 15 节 evidenceIndex 必须用用户给定的 evidence ID 与对应数字填充；两节都禁止输出「当前材料无法判断」之类占位句，禁止编造论文或 evidence ID。确无可用论文/证据时如实留空该条，而不是写占位。
 
 输出格式：只输出一个 JSON 对象。
 {"title":"方案题目","sections":{"problem":"一句话研究问题","background":"背景与已有证据（引用数字）","novelty":"方向位置与新颖性边界","hypotheses":"可验证假设（至少一条可证伪）","datasets":"数据集与获取方式（含可获得性状态）","baselines":"基线与对照","method":"方法设计","metrics":"指标与统计方法","experiments":"三层实验：最小可行实验 / 主实验 / 扩展实验，每层写明时间、算力、成功标准与失败后的替代路线","resources":"复现与资源需求","risks":"风险与失败判据","milestones":"里程碑与时间安排","outcomes":"预期结果与替代路线","references":"代表性参考文献（只能列 context.clusters[].papers 里出现过的论文，写标题+年份+被引，不要列期刊或数据集充数）","evidenceIndex":"证据索引：列出用到的 evidence ID 与对应数字"},"chainAudit":"四步逻辑链自洽检查：局限→想法、想法→挑战、挑战→方法、方法→结果，逐环写通过或断链与修法","scores":[{"dimension":"证据充分度","score":3,"reason":"扣分原因"}],"missing":["缺少的关键约束"],"evidenceIds":["cluster:xxx:size"]}
@@ -87,6 +88,7 @@ const FEASIBILITY_SYSTEM_PROMPT = `你是一名选题可行性体检助手，同
 4. 评分纪律：五维都从 5 分起步，只有给出依据（想法文本里的明确贡献，或站得住的机制论证）才加分；机制论证的分数 basis 必须标 mechanism 并在 evidence 里写明验证实验；无数据也无机制的维度保持 5 分、basis 为 none。不要因为没有实验数据就压低机制扎实的想法。
 5. 致命缺陷最多 2 条；severity：critical=用户时间预算内无法防御，major=需 2–4 周专门工作，minor=一周内可解决。出现 critical 时 verdict.decision 必须是 reject，lifecycle/dimensions/paradigm/risks 可为空。
 6. 每个文本字段不超过 150 字，要点式，中文写作。
+7. 致命缺陷（flaws）与新颖性核对里引用的论文必须出现在送给你的核对文献清单（papers）里，用 [n] 标注且 n 在清单内；不得引用清单之外的论文，不得编造文献或编号。
 体检步骤（次序不能换）：
 第一步 第一印象：paperType 取 新问题/新方法/新设定 之一；story 用一句话讲清这个故事。
 第二步 致命缺陷审计：对照 F1 相对最近工作无新颖性、F2 投稿场所错配、F3 基线太弱或太旧、F4 没有 compelling 动机、F5 能力错配、F6 主张不可验证、F7 数据或伦理卡点、F8 范围过大、F9 拿着方案找问题、F10 没考虑失败情形，只输出确实命中的。
@@ -1273,6 +1275,32 @@ async function fetchCrossrefServer(query: string, retrievedAt: string, filter: s
     .filter((p): p is ServerPaper => p !== null);
 }
 
+/** Crossref 降级相关性过滤用的停用词：只去功能词，保留研究主题词。 */
+const CROSSREF_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "for", "nor", "of", "to", "in", "on", "at", "by",
+  "with", "from", "as", "is", "are", "was", "were", "be", "been", "being", "this", "that",
+  "these", "those", "it", "its", "into", "about", "via", "using", "toward", "towards",
+  "between", "among", "through", "over", "under", "all", "any", "both", "each", "few",
+  "more", "most", "other", "some", "such", "no", "not", "only", "own", "same", "so",
+  "than", "too", "very", "can", "will", "just", "should", "now", "how", "what", "which",
+  "who", "whom", "why", "when", "where", "while", "during", "before", "after", "above",
+  "below", "up", "down", "out", "off", "again", "further", "then", "once", "here", "there",
+]);
+
+/** 检索词分词：小写、按非字母数字/汉字切分、长度>=3、去停用词、去重。 */
+function queryTokens(query: string): string[] {
+  const parts = query.toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter(Boolean);
+  const tokens = parts.filter((token) => token.length >= 3 && !CROSSREF_STOPWORDS.has(token));
+  return [...new Set(tokens)];
+}
+
+/** 标题或摘要命中至少一个检索词 token 才认为相关；无可用 token 时不做过滤。 */
+function crossrefRelevant(paper: ServerPaper, tokens: string[]): boolean {
+  if (tokens.length === 0) return true;
+  const haystack = `${paper.title} ${paper.abstract ?? ""}`.toLowerCase();
+  return tokens.some((token) => haystack.includes(token));
+}
+
 async function serverRetrieve(query: string): Promise<{
   papers: ServerPaper[];
   report: ServerReport;
@@ -1304,7 +1332,25 @@ async function serverRetrieve(query: string): Promise<{
       .map((work) => mapOpenAlex(work, query, oaFilter, retrievedAt))
       .filter((p): p is ServerPaper => p !== null);
     if (oaPapers.length === 0) {
-      throw new Error(`OpenAlex 没有返回「${query}」相关的结果`);
+      // 主源请求成功但 0 命中：这是「没检索到」，不是故障。不降级 Crossref、不产聚类，
+      // 直接返回空结果让用户换检索词，避免把 Crossref 噪声当成领域样本下判定。
+      const report: ServerReport = {
+        job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+        sourceReports: [
+          { source: "openalex", filter: oaFilter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
+        ],
+        totalBeforeDedup: 0,
+        totalAfterDedup: 0,
+        removedByDedup: 0,
+        abstractCoverage: 0,
+        oaCoverage: 0,
+        limitations: [`未检索到「${query}」相关结果，建议更换检索词后重试。`],
+        sampleFrame: SEARCH_SAMPLE_FRAME,
+        fromCache: false,
+        degraded: false,
+        retrievedAt,
+      };
+      return { papers: [], report, source: "openalex", degraded: false, detail: "未检索到相关结果，建议换检索词" };
     }
 
     const s2 = await fetchS2(query, fromYear, toYear, retrievedAt, s2Filter);
@@ -1365,13 +1411,46 @@ async function serverRetrieve(query: string): Promise<{
   } catch (oaError) {
     const reason = oaError instanceof Error ? oaError.message : "未知错误";
     const crFilter = `query.bibliographic:${query}`;
-    const papers = await fetchCrossrefServer(query, retrievedAt, crFilter);
-    if (papers.length === 0) throw new Error(`主源与备选源都没有返回「${query}」的结果（${reason}）`);
-    const before = papers.length;
-    const { papers: deduped, removed } = serverDedup(papers);
+    const fetched = await fetchCrossrefServer(query, retrievedAt, crFilter);
+    // 只有主源请求失败才走到这里；Crossref 是宽匹配，必须按检索词 token 过滤掉噪声。
+    const tokens = queryTokens(query);
+    const relevant = fetched.filter((paper) => crossrefRelevant(paper, tokens));
+    if (relevant.length === 0) {
+      const report: ServerReport = {
+        job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+        sourceReports: [
+          { source: "openalex", filter: oaFilter, returned: 0, failed: true, error: reason, abstractCoverage: 0, oaCoverage: 0 },
+          { source: "crossref", filter: crFilter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
+        ],
+        totalBeforeDedup: 0,
+        totalAfterDedup: 0,
+        removedByDedup: 0,
+        abstractCoverage: 0,
+        oaCoverage: 0,
+        limitations: [
+          `主来源 OpenAlex 不可用（${reason}），已降级到 Crossref。`,
+          "Crossref 降级结果，已按检索词过滤，方向判定仅供参考。",
+          `按检索词过滤后无相关条目（Crossref 原始 ${fetched.length} 条均不命中检索词），建议更换检索词。`,
+        ],
+        sampleFrame: SEARCH_SAMPLE_FRAME,
+        fromCache: false,
+        degraded: true,
+        retrievedAt,
+      };
+      return {
+        papers: [],
+        report,
+        source: "crossref",
+        degraded: true,
+        detail: "OpenAlex 暂时不可用，Crossref 降级结果按检索词过滤后无相关条目，建议更换检索词。",
+      };
+    }
+    const before = relevant.length;
+    const { papers: deduped, removed } = serverDedup(relevant);
     const cov = serverCoverage(deduped);
     const limitations = [
       `主来源 OpenAlex 不可用（${reason}），已降级到 Crossref：没有主题标签，摘要覆盖也低。`,
+      "Crossref 降级结果，已按检索词过滤，方向判定仅供参考。",
       ...(removed > 0 ? [`去重后移除 ${removed} 篇重复记录。`] : []),
       SEARCH_SAMPLE_FRAME,
     ];
@@ -1397,7 +1476,7 @@ async function serverRetrieve(query: string): Promise<{
       report,
       source: "crossref",
       degraded: true,
-      detail: `OpenAlex 暂时不可用（${reason}）→ 站点服务端已改用 Crossref：${deduped.length} 篇，结果缓存 12 小时。`,
+      detail: `OpenAlex 暂时不可用（${reason}）→ 站点服务端已改用 Crossref（按检索词过滤）：${deduped.length} 篇，结果缓存 12 小时。`,
     };
   }
 }
@@ -1452,7 +1531,9 @@ export async function handler(request: Request): Promise<Response> {
             source: cached.report.degraded ? "crossref" : "openalex",
             degraded: cached.report.degraded,
             cached: true,
-            detail: `命中站点共享缓存：${cached.papers.length} 篇，12 小时内重复检索不消耗上游额度。`,
+            detail: cached.papers.length === 0
+              ? "未检索到相关结果，建议换检索词（命中站点共享缓存）。"
+              : `命中站点共享缓存：${cached.papers.length} 篇，12 小时内重复检索不消耗上游额度。`,
           },
           200,
         );

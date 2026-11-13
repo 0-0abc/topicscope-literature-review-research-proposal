@@ -14,6 +14,7 @@ import { ApiError, requestJson } from "@/lib/api";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
 import type { DirectionContext } from "@/lib/ai/directions";
+import { auditTextNumbers, buildNumericWhitelist } from "@/lib/ai/grounding";
 import {
   buildFeasibilityPayload,
   integrityCheck,
@@ -104,6 +105,23 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
     return buildFeasibilityPayload(context, radar, byId, clusterId, effectiveIdea, capability);
   }, [context, radar, byId, clusterId, effectiveIdea, capability]);
 
+  // M3 数字回查：体检报告正文里的数字必须能在送入模型的统计白名单里找到
+  const numberWarnings = useMemo(() => {
+    if (!result) return [];
+    const text = [
+      result.firstImpression.story,
+      ...result.flaws.flatMap((flaw) => [flaw.detail, flaw.defense]),
+      result.lifecycle.reason,
+      ...result.dimensions.map((dim) => dim.evidence),
+      ...result.paradigm.map((probe) => probe.reason),
+      ...result.risks.map((risk) => risk.mitigation),
+      result.verdict.reason,
+      ...result.verdict.actions,
+      result.limitation,
+    ].join("\n");
+    return auditTextNumbers(text, buildNumericWhitelist(context));
+  }, [result, context]);
+
   if (available !== "ready") {
     return <AiServiceNotice status={available} feature="选题体检" />;
   }
@@ -139,7 +157,7 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
   const setCapabilityField = <K extends keyof CapabilityProfile>(key: K, value: CapabilityProfile[K]) =>
     setCapability((prev) => ({ ...prev, [key]: value }));
 
-  const integrity = result ? integrityCheck(result) : null;
+  const integrity = result ? integrityCheck(result, refs) : null;
 
   return (
     <div className="space-y-5">
@@ -190,6 +208,9 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
             </label>
             <label className="space-y-1.5 text-xs text-muted-foreground">
               每周有效小时（专注科研的时间）
+              {capability.weeklyHours === DEFAULT_CAPABILITY.weeklyHours ? (
+                <span className="ml-1 font-normal">（默认值，可修改）</span>
+              ) : null}
               <Input
                 type="number"
                 min={1}
@@ -203,6 +224,9 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
             </label>
             <label className="space-y-1.5 text-xs text-muted-foreground">
               时间预算（月，到必须产出为止）
+              {capability.months === DEFAULT_CAPABILITY.months ? (
+                <span className="ml-1 font-normal">（默认值，可修改）</span>
+              ) : null}
               <Input
                 type="number"
                 min={1}
@@ -305,6 +329,11 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
             <Button size="sm" onClick={() => void generate()} disabled={status === "loading" || !prepared}>
               {status === "loading" ? "体检中…" : "开始选题体检"}
             </Button>
+            {!idea.trim() && cluster ? (
+              <span className="text-[11px] text-muted-foreground">
+                未填写想法，将按方向级体检评估「{cluster.name}」（具体想法待补充）。
+              </span>
+            ) : null}
             <span className="text-[11px] text-muted-foreground">
               能力为自报，未经核验；体检约需 20–40 秒。
             </span>
@@ -357,6 +386,13 @@ export function FeasibilityChecker({ context, radar, byId, report, seed, initial
               </p>
             ))}
           </section>
+
+          {numberWarnings.length > 0 ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              正文数字未核对：{numberWarnings.join("、")}。这些数字不在送入模型的统计白名单内，
+              请回到论文原文人工核对后再引用。
+            </div>
+          ) : null}
 
           <section className="space-y-1.5">
             <h4 className="heading-cn text-sm">一、第一印象</h4>

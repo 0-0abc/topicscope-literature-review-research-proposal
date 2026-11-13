@@ -96,6 +96,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!showSettings) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowSettings(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showSettings]);
+
   const resetSessionOutputs = () => {
     setChatMessages([]);
     setCheckupState(null);
@@ -181,11 +190,11 @@ export default function App() {
               aria-label="研究方向"
               className="h-9 min-w-0 flex-1 lg:w-80 lg:flex-none"
             />
-            <Button size="sm" onClick={handleSearch} disabled={corpus.status === "loading"}>
+            <Button size="sm" onClick={handleSearch} disabled={corpus.status === "loading" || !query.trim()}>
               {corpus.status === "loading" ? "检索中…" : "在线检索"}
             </Button>
-            <Button size="sm" variant="outline" onClick={handleRefresh} disabled={corpus.status === "loading"}>
-              重新检索
+            <Button size="sm" variant="outline" onClick={handleRefresh} disabled={corpus.status === "loading" || !query.trim()}>
+              强制刷新
             </Button>
             <Button size="sm" variant="outline" onClick={handleSnapshot}>
               离线示例
@@ -194,6 +203,9 @@ export default function App() {
               设置
             </Button>
           </div>
+          {!query.trim() ? (
+            <p className="text-[11px] text-muted-foreground">请输入研究方向后再检索（空检索词已禁用）。</p>
+          ) : null}
         </div>
 
         {showSettings ? (
@@ -253,6 +265,13 @@ export default function App() {
         <div className="border-b border-border bg-muted/30">
           <div className="mx-auto max-w-6xl px-4 py-1.5 text-[11px] text-muted-foreground">
             检测到中文检索词：OpenAlex / Semantic Scholar 以英文索引为主，中文召回可能偏少，建议改用英文术语（如「医学图像分割」→ medical image segmentation）。
+          </div>
+        </div>
+      ) : null}
+      {corpus.degraded ? (
+        <div className="border-b border-border bg-amber-500/10">
+          <div className="mx-auto max-w-6xl px-4 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+            当前为 Crossref 降级检索结果（OpenAlex 暂不可用），已按检索词过滤；方向判定与建议仅供参考，不做正式推荐。
           </div>
         </div>
       ) : null}
@@ -316,6 +335,7 @@ export default function App() {
               clusterPairs={corpus.clusterPairs}
               directionContext={directionContext}
               report={corpus.report}
+              degraded={corpus.degraded}
               onInspectCluster={inspectCluster}
               onCheckup={startCheckup}
             />
@@ -506,8 +526,9 @@ export default function App() {
           <p className="label-caps mb-2">数据与方法说明</p>
           <p className="max-w-3xl text-[11px] leading-relaxed text-muted-foreground">
             书目数据来自 OpenAlex 开放接口，标题与摘要版权归原作者所有。聚类、覆盖判定、指标换算与六维评分由
-            TF-IDF + 球面 k-means 等在你的浏览器本地计算，不上传。但「在线检索」会把检索词发往 OpenAlex /
-            Crossref；「AI 方向建议 / 综述 / 体检 / 方案 / 对话」会把你选择的统计数字、论文标题与摘要节选、
+            TF-IDF + 球面 k-means 等在你的浏览器本地计算，不上传。「在线检索」把检索词发往站点服务端 Function，
+            由服务端请求 OpenAlex 主源 + Semantic Scholar 第二主源（Crossref 兜底），结果在服务端共享缓存 12 小时；
+            「AI 方向建议 / 综述 / 体检 / 方案 / 对话」会把你选择的统计数字、论文标题与摘要节选、
             以及你勾选的已核对证据内容发送到站点自带的模型服务。研究档案与证据标注只保存在本机浏览器。
             指标口径的换算规则经过独立实现交叉验证。
           </p>

@@ -8,10 +8,14 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, requestJson } from "@/lib/api";
 import type { DirectionContext } from "@/lib/ai/directions";
+import { auditTextNumbers, buildNumericWhitelist } from "@/lib/ai/grounding";
 import {
   PLAN_SECTIONS,
   RESOURCE_KIND_LABEL,
   RESOURCE_STATUS_LABEL,
+  buildEvidenceIndexText,
+  findUnauthorizedResourceTerms,
+  isPlaceholderSection,
   parsePlan,
   resolvePlanEvidence,
   type PlanConstraints,
@@ -20,8 +24,8 @@ import {
   type ResourceRoute,
   type ResourceStatus,
 } from "@/lib/ai/plan";
-import type { SearchReport } from "@/lib/data/types";
-import { downloadText, researchPlanToMarkdown } from "@/lib/export";
+import type { Paper, SearchReport } from "@/lib/data/types";
+import { downloadText, formatGB7714, researchPlanToMarkdown } from "@/lib/export";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
 import { EVIDENCE_FIELDS, type EvidenceNote } from "@/hooks/useEvidenceStore";
@@ -53,6 +57,49 @@ const CONSTRAINT_FIELDS: {
   { key: "openCode", label: "是否要求开放代码", placeholder: "例如：要求，需要能复现" },
   { key: "target", label: "预期产出", placeholder: "例如：开题报告 + 一篇会议投稿" },
 ];
+
+const CONSTRAINT_LABELS: Record<string, string> = {
+  ...Object.fromEntries(CONSTRAINT_FIELDS.map((field) => [field.key, field.label])),
+  metricCaliber: "指标口径",
+};
+
+/**
+ * M6 空壳修复：用当前检索样本里的真实论文（标题+年份+被引）填充第 14 节。
+ * 能在完整论文列表里匹配到标题时用 GB/T 7714 格式，否则用标题+出处+年份兜底。
+ */
+function buildClusterReferences(context: DirectionContext | null, fullPapers?: Paper[]): string {
+  if (!context) return "当前检索样本没有可列出的论文。";
+  const byTitle = new Map((fullPapers ?? []).map((paper) => [paper.title.trim().toLowerCase(), paper]));
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const cluster of context.clusters) {
+    for (const paper of cluster.papers) {
+      const key = paper.title.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const n = lines.length + 1;
+      const full = byTitle.get(key);
+      const cite = full
+        ? formatGB7714(full, n)
+        : `[${n}] ${paper.title}. ${paper.venue ?? "出处不详"}, ${paper.year}.`;
+      lines.push(`${cite} 被引 ${paper.citedByCount} 次.`);
+      if (lines.length >= 20) break;
+    }
+    if (lines.length >= 20) break;
+  }
+  if (lines.length === 0) return "当前检索样本没有可列出的论文。";
+  return lines.join("\n");
+}
+
+/** 复现包用的简单内容哈希（FNV-1a 32 位），用于校验导出文本是否被改动。 */
+function simpleHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `fnv1a32:${hash.toString(16).padStart(8, "0")}`;
+}
 
 interface Props {
   context: DirectionContext | null;
@@ -131,6 +178,9 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [revised, setRevised] = useState(false);
+  // M6/M3 客户端校验结果：代猜的资源词与未核对的正文数字
+  const [resourceWarnings, setResourceWarnings] = useState<string[]>([]);
+  const [numberWarnings, setNumberWarnings] = useState<string[]>([]);
 
   useEffect(() => {
     if (!constraintSeed) return;
@@ -191,6 +241,8 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
     if (!context) return;
     setStatus("loading");
     setError(null);
+    setResourceWarnings([]);
+    setNumberWarnings([]);
     const inputConstraints = Object.fromEntries(
       Object.entries(constraints).filter(([, value]) => value.trim()),
     );
@@ -229,6 +281,32 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
       if (!parsed) {
         throw new ApiError("模型没有给出可用格式的方案，请再试一次。", "empty_output");
       }
+      // M6 禁代猜：用户约束/资源没有覆盖的具体资源词，收集进待补充并明示
+      const unauthorized = findUnauthorizedResourceTerms(parsed, [
+        ...Object.values(inputConstraints),
+        ...inputResources.map((item) => item.name),
+      ]);
+      if (unauthorized.length > 0) {
+        parsed.missing = [
+          ...parsed.missing,
+          `模型代猜了未提供的约束：${unauthorized.join("、")}，已移入待补充`,
+        ];
+      }
+      // M6 空壳修复：14/15 节为空或只有占位句时，用真实论文与证据解析结果填充
+      const resolvedItems = resolvePlanEvidence(parsed.evidenceIds, context.evidence);
+      if (isPlaceholderSection(parsed.sections.references)) {
+        parsed.sections.references = buildClusterReferences(context, papers);
+      }
+      if (isPlaceholderSection(parsed.sections.evidenceIndex)) {
+        parsed.sections.evidenceIndex = buildEvidenceIndexText(resolvedItems);
+      }
+      // M3 数字回查：正文数字必须能在送入模型的统计白名单里找到
+      const unmatchedNumbers = auditTextNumbers(
+        PLAN_SECTIONS.map((section) => parsed.sections[section.key]).join("\n"),
+        buildNumericWhitelist(context),
+      );
+      setResourceWarnings(unauthorized);
+      setNumberWarnings(unmatchedNumbers);
       const md = buildMarkdown(parsed, {
         model: body.model,
         generatedAt: body.generatedAt,
@@ -296,6 +374,41 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
       ? `> 本导出含人工修订（修订于 ${new Date().toISOString().slice(0, 16).replace("T", " ")}），修订内容未经模型重新生成。\n\n${storedMarkdown}`
       : storedMarkdown;
     downloadText(`topicscope-plan-${stamp}.md`, body, "text/markdown");
+  };
+
+  /** S4/A2 复现包：冻结的输入 + 提示词摘要 + 证据白名单 + 导出文本哈希。 */
+  const exportRepro = () => {
+    if (!plan || !frozen || !storedMarkdown) return;
+    const repro = {
+      model,
+      generatedAt,
+      temperature: 0,
+      temperatureNote:
+        "temperature=0 为复现建议值；生成时服务端实际调用 temperature=0.4（functions/handler.ts callModel）",
+      promptSummary: "PLAN_SYSTEM_PROMPT+资源规则",
+      contextStats: frozen.context?.corpus ?? null,
+      evidenceWhitelist: (frozen.context?.evidence ?? []).map((item) => item.id),
+      constraints: frozen.constraints,
+      resources: frozen.resources
+        .filter((item) => item.name.trim())
+        .map((item) => ({
+          kind: item.kind,
+          name: item.name.trim(),
+          status: item.status,
+          url: item.url.trim() || undefined,
+          license: item.license.trim() || undefined,
+          accessCondition: item.accessCondition.trim() || undefined,
+        })),
+      verified: frozen.verified,
+      draftConclusions: frozen.draftConclusions,
+      contentHash: simpleHash(storedMarkdown),
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadText(
+      `topicscope-plan-repro-${stamp}.json`,
+      JSON.stringify(repro, null, 2),
+      "application/json",
+    );
   };
 
   return (
@@ -514,6 +627,15 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
                   导出方案 Markdown
                 </Button>
                 <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={exportRepro}
+                  disabled={!frozen || !storedMarkdown}
+                  title={frozen ? undefined : "档案载入的方案没有生成时输入快照，无法导出复现包"}
+                >
+                  导出复现包 JSON
+                </Button>
+                <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => {
@@ -577,6 +699,18 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
 
       {status === "ready" && plan ? (
         <div className="space-y-4">
+          {resourceWarnings.length > 0 ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-relaxed text-destructive">
+              模型代猜了未提供的约束：{resourceWarnings.join("、")}。已移入「待补充条件」；
+              请补充对应约束或核实这些资源后重新生成，不要直接采信正文里的这些设定。
+            </div>
+          ) : null}
+          {numberWarnings.length > 0 ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              正文数字未核对：{numberWarnings.join("、")}。这些数字不在送入模型的统计白名单内，
+              请回到论文原文人工核对后再引用。
+            </div>
+          ) : null}
           <section className="space-y-2">
             <h2 className="heading-cn text-base">{plan.title}</h2>
             <div className="grid gap-px overflow-hidden rounded-md border border-border bg-border sm:grid-cols-5">
@@ -674,6 +808,98 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
               <Badge variant="destructive">{resolved.unknown.length} 条引用无法核对</Badge>
             ) : null}
           </div>
+
+          {frozen ? (
+            <details className="rounded-md border border-border px-3 py-2 text-xs">
+              <summary className="cursor-pointer font-medium">
+                生成时输入快照（已冻结，导出与复现包均以此为准）
+              </summary>
+              <div className="mt-2 space-y-2 leading-relaxed text-muted-foreground">
+                <p>
+                  模型：{model ?? "未记录"} ｜ 生成时间：{generatedAt ?? "未记录"}
+                </p>
+                <div>
+                  <p className="font-medium text-foreground">约束</p>
+                  {Object.keys(frozen.constraints).length === 0 ? (
+                    <p>未填写任何约束（缺项全部进入待补充，不允许模型代猜）。</p>
+                  ) : (
+                    <ul className="list-disc space-y-0.5 pl-4">
+                      {Object.entries(frozen.constraints).map(([key, value]) => (
+                        <li key={key}>
+                          {CONSTRAINT_LABELS[key] ?? key}：{value}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="font-medium text-foreground">
+                    资源（{frozen.resources.filter((item) => item.name.trim()).length} 项）
+                  </p>
+                  {frozen.resources.filter((item) => item.name.trim()).length === 0 ? (
+                    <p>未登记任何资源。</p>
+                  ) : (
+                    <ul className="list-disc space-y-0.5 pl-4">
+                      {frozen.resources
+                        .filter((item) => item.name.trim())
+                        .map((item, index) => (
+                          <li key={index}>
+                            {RESOURCE_KIND_LABEL[item.kind]} · {item.name} ·{" "}
+                            {RESOURCE_STATUS_LABEL[item.status]}
+                            {item.url.trim() ? ` · ${item.url.trim()}` : ""}
+                            {item.license.trim() ? ` · 许可：${item.license.trim()}` : ""}
+                            {item.accessCondition.trim()
+                              ? ` · 获取条件：${item.accessCondition.trim()}`
+                              : ""}
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="font-medium text-foreground">
+                    已核对证据（{frozen.verified.length} 篇）
+                  </p>
+                  {frozen.verified.length === 0 ? (
+                    <p>未提交已核对证据。</p>
+                  ) : (
+                    <ul className="list-disc space-y-1 pl-4">
+                      {frozen.verified.map((item) => (
+                        <li key={item.paperId}>
+                          <span className="text-foreground">{item.paperTitle}</span>
+                          <ul className="list-[circle] space-y-0.5 pl-4">
+                            {item.fields.map((field) => (
+                              <li key={field.key}>
+                                {field.label}：{field.value}
+                                {field.location ? `（位置：${field.location}）` : ""}
+                                {field.verifiedAt ? `（核对于 ${field.verifiedAt}）` : ""}
+                              </li>
+                            ))}
+                          </ul>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="font-medium text-foreground">
+                    草稿结论（{frozen.draftConclusions.length} 条）
+                  </p>
+                  {frozen.draftConclusions.length === 0 ? (
+                    <p>无。</p>
+                  ) : (
+                    <ul className="list-disc space-y-0.5 pl-4">
+                      {frozen.draftConclusions.map((item, index) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <p>体检摘要：{frozen.checkupSummary ?? "无"}</p>
+                <p>综述摘要：{frozen.reviewSummary ?? "无"}</p>
+              </div>
+            </details>
+          ) : null}
         </div>
       ) : null}
     </div>

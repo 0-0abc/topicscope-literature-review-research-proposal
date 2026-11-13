@@ -20,6 +20,8 @@ interface Props {
   clusterPairs: Map<number, TermPair[]>;
   directionContext: DirectionContext | null;
   report: SearchReport | null;
+  /** 来源降级（如 Crossref 兜底）：隐藏正式推荐入口，只给参考性提示 */
+  degraded?: boolean;
   onInspectCluster: (cluster: TopicCluster) => void;
   onCheckup: (idea: string, clusterId: number | null) => void;
 }
@@ -30,6 +32,7 @@ export function RadarView({
   clusterPairs,
   directionContext,
   report,
+  degraded = false,
   onInspectCluster,
   onCheckup,
 }: Props) {
@@ -46,6 +49,15 @@ export function RadarView({
     acc[cluster.verdict] = (acc[cluster.verdict] ?? 0) + 1;
     return acc;
   }, {});
+
+  // 局限条目与样本框同文或互相包含时不再重复渲染（M1 文案重复）
+  const visibleLimitations = report
+    ? report.limitations.filter((item) => {
+        const limitation = item.trim();
+        const frame = report.sampleFrame.trim();
+        return limitation !== frame && !limitation.includes(frame) && !frame.includes(limitation);
+      })
+    : [];
 
   return (
     <div className="space-y-8">
@@ -71,11 +83,13 @@ export function RadarView({
           </div>
           <div className="flex items-center gap-3">
             <p className="hidden max-w-xl text-right text-[11px] leading-relaxed text-muted-foreground lg:block">
-              判定规则：论文数 ≤ 3 视为当前检索未观察到；占比 &lt; 10% 且近三年占比 ≥ 60% 视为增长窗口；占比 ≥ 12% 且中位年份早于区间末尾 4 年以上、近期新增 ≤ 35% 视为高密度成熟方向。
+              判定规则：size &lt; 10 或占比 &lt; 5% 视为样本内稀疏 · 证据不足；占比 &lt; 10% 且近三年占比 ≥ 60% 视为增长窗口；占比 ≥ 12% 且中位年份早于区间末尾 4 年以上、近期新增 ≤ 35% 视为高密度成熟方向；其余为稳定产出方向。
             </p>
-            <Button variant="outline" size="sm" className="shrink-0" onClick={() => setReportOpen(true)}>
-              导师汇报
-            </Button>
+            {!degraded ? (
+              <Button variant="outline" size="sm" className="shrink-0" onClick={() => setReportOpen(true)}>
+                导师汇报
+              </Button>
+            ) : null}
           </div>
         </div>
         {report ? (
@@ -83,7 +97,7 @@ export function RadarView({
             <figcaption className="label-caps mb-1">样本框与已知局限</figcaption>
             <p className="text-xs leading-relaxed text-muted-foreground">
               {report.sampleFrame}
-              {report.limitations.length > 0 ? ` 已知局限：${report.limitations.join(" ")}` : ""}
+              {visibleLimitations.length > 0 ? ` 已知局限：${visibleLimitations.join(" ")}` : ""}
             </p>
           </figure>
         ) : null}
@@ -106,7 +120,13 @@ export function RadarView({
           <span className="section-kicker">02</span>
           <h2 className="heading-cn text-base">研究方向建议</h2>
         </div>
-        <DirectionAdvisor context={directionContext} onCheckupIdea={(idea) => onCheckup(idea, null)} />
+        {degraded ? (
+          <p className="rounded-md border border-dashed border-border px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+            当前为 Crossref 降级检索结果，已按检索词过滤；方向判定与建议仅供参考，不做正式推荐
+          </p>
+        ) : (
+          <DirectionAdvisor context={directionContext} onCheckupIdea={(idea) => onCheckup(idea, null)} />
+        )}
       </section>
 
       <section className="space-y-3">
@@ -121,16 +141,18 @@ export function RadarView({
         <CooccurrenceGraph graph={graph} />
       </section>
 
-      <AdvisorReportDialog
-        radar={radar}
-        report={report}
-        open={reportOpen}
-        onOpenChange={setReportOpen}
-        onCheckup={(cluster) => {
-          setReportOpen(false);
-          onCheckup("", cluster.id);
-        }}
-      />
+      {!degraded ? (
+        <AdvisorReportDialog
+          radar={radar}
+          report={report}
+          open={reportOpen}
+          onOpenChange={setReportOpen}
+          onCheckup={(cluster) => {
+            setReportOpen(false);
+            onCheckup("", cluster.id);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -170,9 +192,9 @@ function ClusterCard({
             >
               {meta.label}
             </Badge>
-            {cluster.evidenceWeak ? (
+            {cluster.evidenceWeak && cluster.verdict !== "insufficient" ? (
               <Badge variant="outline" className="rounded-sm">
-                {VERDICT_META.insufficient.label}
+                摘要覆盖不足
               </Badge>
             ) : null}
           </div>
@@ -223,13 +245,17 @@ function ClusterCard({
           className={`text-[11px] leading-relaxed text-muted-foreground ${
             expanded ? "" : "line-clamp-1"
           }`}
-          title={expanded ? undefined : VERDICT_META[cluster.verdict].cannotConclude}
+          title={expanded ? undefined : cluster.cannotConclude}
         >
-          不能推出什么：{VERDICT_META[cluster.verdict].cannotConclude}
+          不能推出什么：{cluster.cannotConclude}
         </p>
 
         {expanded ? (
           <>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              判定规则：{cluster.ruleTrace}
+            </p>
+
             <p className="text-[11px] leading-relaxed text-muted-foreground">
               材料范围：{cluster.coverageNote}
             </p>

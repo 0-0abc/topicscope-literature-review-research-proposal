@@ -20,7 +20,7 @@ import {
   type ScorePreference,
 } from "@/lib/analysis/scoring";
 import type { Paper, SearchReport, SourceName } from "@/lib/data/types";
-import { downloadText, papersToCsv, papersToMarkdown, searchReportToMarkdown } from "@/lib/export";
+import { downloadText, papersToCsv, papersToMarkdown } from "@/lib/export";
 import { compactNumber } from "@/lib/format";
 import { useScoreContext } from "@/hooks/useScoreContext";
 import type { EvidenceLevel } from "@/hooks/useEvidenceStore";
@@ -154,28 +154,30 @@ export function LibraryView({
     const stamp = new Date().toISOString().slice(0, 10);
     if (format === "csv") {
       downloadText(
-        `topicscope-${stamp}.csv`,
+        `topicscope-${list.length}-${stamp}.csv`,
         papersToCsv(list, (paper) => ({
           oaStatus: paper.oaStatus ?? "none",
           verifiedFields: String(verifiedCountOf?.(paper) ?? 0),
+          query: report?.job.rawQuestion ?? query,
+          sampleFrame: report?.sampleFrame ?? "",
         })),
         "text/csv",
       );
       return;
     }
     const title = clusterFilter !== null ? `${clusterName.get(clusterFilter)} · 文献清单` : "文献清单";
-    const note = `检索式与来源见 TopicScope 的「方向雷达」页；共 ${list.length} 篇，按被引次数排序。`;
-    const snapshot = report ? `\n\n${searchReportToMarkdown(report)}` : "";
+    const note = `共 ${list.length} 篇，按被引次数排序；检索式、来源、去重与局限见上方检索快照。`;
     downloadText(
-      `topicscope-${stamp}.md`,
-      `${papersToMarkdown(list, {
+      `topicscope-${list.length}-${stamp}.md`,
+      papersToMarkdown(list, {
         title,
         note,
+        report,
         clusterOf: (paper) => {
           const id = assignment.get(paper.id);
           return id === undefined ? undefined : clusterName.get(id);
         },
-      })}${snapshot}`,
+      }),
       "text/markdown",
     );
   };
@@ -382,7 +384,7 @@ export function LibraryView({
                 导出 CSV（{selected.size}）
               </Button>
               <Button variant="ghost" size="sm" onClick={() => exportPapers(filtered, "markdown")}>
-                导出全部结果
+                导出全部结果（Markdown · {filtered.length} 篇）
               </Button>
             </div>
           </div>

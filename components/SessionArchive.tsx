@@ -151,7 +151,7 @@ export function SessionArchive({
             <h2 className="heading-cn text-sm">保存当前研究会话</h2>
             <p className="text-xs leading-relaxed text-muted-foreground">
               存档会带上当前检索快照、{papers.length} 篇论文、你已经核对过的证据标注、研究方案，以及研究对话、选题体检、文献综述与方案草稿结论。
-              存档保存在这台设备的浏览器里（IndexedDB），断网后仍能查看和导出。
+              存档保存在这台设备的浏览器里（IndexedDB）。当前会话内可查看与导出；静态资源与快照已被 Service Worker 缓存，断网刷新/重开仍可加载。
             </p>
           </div>
           <Textarea

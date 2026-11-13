@@ -26,7 +26,10 @@ import {
   type MetricInput,
   type MetricResult,
 } from "@/lib/metrics/registry";
-import { f1FromPrecisionRecall } from "@/lib/metrics/classification";
+import {
+  f1FromPrecisionRecall,
+  validateConfusionMatrix,
+} from "@/lib/metrics/classification";
 import { diceFromIou, iouFromDice } from "@/lib/metrics/segmentation";
 import type { ConfusionMatrix, SegmentationClass } from "@/lib/metrics/types";
 import { metricValue, percent } from "@/lib/format";
@@ -99,7 +102,17 @@ export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
     return { kind: "classification", matrix: binaryMode ? toMatrix(binary) : matrix };
   }, [task, segments, rankingText, rankingK, trueText, predText, matrix, binaryMode, binary]);
 
-  const results = useMemo(() => computeMetrics(input), [input]);
+  // S1：分类输入先校验再计算。非法时不产出任何指标，避免负数/小数/N=0
+  // 被静默算成「看起来有效」的数字。
+  const validation = useMemo(() => {
+    if (task !== "classification") return { ok: true, errors: [] as string[] };
+    return validateConfusionMatrix(binaryMode ? binary : matrix);
+  }, [task, binaryMode, binary, matrix]);
+
+  const results = useMemo(
+    () => (validation.ok ? computeMetrics(input) : []),
+    [input, validation.ok],
+  );
 
   return (
     <div className="space-y-6">
@@ -140,6 +153,21 @@ export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
                 ) : (
                   <MatrixInput value={matrix} onChange={setMatrix} />
                 )}
+                {!validation.ok ? (
+                  <div
+                    role="alert"
+                    className="mt-3 space-y-1 rounded-md border border-destructive/40 px-3 py-2"
+                  >
+                    {validation.errors.map((error) => (
+                      <p key={error} className="text-xs text-destructive">
+                        {error}
+                      </p>
+                    ))}
+                    <p className="text-[11px] text-destructive">
+                      输入不合法，已停止计算：请修正后再看指标。
+                    </p>
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           </TabsContent>
@@ -224,7 +252,23 @@ export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
             每个指标都标注了口径与公式；带提示的指标说明它在什么情况下会被误读。
           </p>
         </div>
-        <MetricTable results={results} />
+        {validation.ok ? (
+          <MetricTable results={results} />
+        ) : (
+          <div
+            role="alert"
+            className="space-y-1 rounded-lg border border-destructive/40 px-4 py-6"
+          >
+            <p className="text-xs font-medium text-destructive">
+              输入不合法，未计算任何指标。
+            </p>
+            {validation.errors.map((error) => (
+              <p key={error} className="text-xs text-destructive">
+                {error}
+              </p>
+            ))}
+          </div>
+        )}
       </section>
 
       <Separator />
@@ -260,6 +304,15 @@ function toMatrix(counts: { tp: number; fp: number; fn: number; tn: number }): C
       [counts.fp, counts.tn],
     ],
   };
+}
+
+/**
+ * 计数输入解析：保留用户键入的负数与小数，交给 validateConfusionMatrix 判定。
+ * 这里不做 Math.max(0, …) 之类的静默截断——那会把非法输入伪装成合法计数。
+ */
+function parseCount(raw: string): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 0;
 }
 
 function MatrixInput({
@@ -304,7 +357,7 @@ function MatrixInput({
                       aria-label={`${value.labels[i]} 真实、${value.labels[j]} 预测`}
                       onChange={(event) => {
                         const next = value.m.map((line) => [...line]);
-                        next[i][j] = Math.max(0, Number(event.target.value) || 0);
+                        next[i][j] = parseCount(event.target.value);
                         onChange({ ...value, m: next });
                       }}
                       className="h-8 w-16 text-center tabular-nums"
@@ -364,7 +417,7 @@ function BinaryInput({
             min={0}
             value={value[field.key]}
             onChange={(event) =>
-              onChange({ ...value, [field.key]: Math.max(0, Number(event.target.value) || 0) })
+              onChange({ ...value, [field.key]: parseCount(event.target.value) })
             }
             className="h-9 tabular-nums"
           />

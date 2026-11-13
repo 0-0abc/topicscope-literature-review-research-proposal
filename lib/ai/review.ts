@@ -1,5 +1,6 @@
 import type { RadarResult } from "../analysis/radar";
 import type { Paper, SearchReport } from "../data/types";
+import { filterOnTopic } from "../data/relevance";
 import { formatGB7714 } from "../export";
 import type { DirectionContext } from "./directions";
 
@@ -21,22 +22,43 @@ export interface ResearchReview {
 export interface ReviewRef {
   n: number;
   paper: Paper;
+  /** 来源异常提示：venue 为会议录/proceedings，或无 DOI 且无作者 */
+  anomaly?: string;
+}
+
+/** 编号文献的来源异常检查（S6）：只标注风险，不剔除文献，核对责任交给用户。 */
+function detectRefAnomaly(paper: Paper): string | undefined {
+  const notes: string[] = [];
+  const venue = paper.venue ?? "";
+  if (/proceedings/i.test(venue) || venue.includes("会议录")) {
+    notes.push("venue 为会议录/proceedings，需核对是否正式发表");
+  }
+  if (!paper.doi && (paper.authors ?? []).length === 0) {
+    notes.push("无 DOI 且无作者，来源需人工核对");
+  }
+  return notes.length > 0 ? notes.join("；") : undefined;
 }
 
 export function buildReviewPayload(
   context: DirectionContext,
   radar: RadarResult,
   byId: Map<string, Paper>,
+  report?: SearchReport | null,
 ): { payload: { context: DirectionContext; papers: unknown[] }; refs: ReviewRef[] } {
+  // 与导师汇报共用同一套 relevance gate（M5）：编号文献必须在检索词主题内
+  const query = context.query || report?.job.rawQuestion || "";
   const refs: ReviewRef[] = [];
   for (const cluster of radar.clusters.slice(0, 6)) {
-    const members = cluster.paperIds
-      .map((id) => byId.get(id))
-      .filter((paper): paper is Paper => Boolean(paper))
+    const members = filterOnTopic(
+      cluster.paperIds
+        .map((id) => byId.get(id))
+        .filter((paper): paper is Paper => Boolean(paper)),
+      query,
+    )
       .sort((a, b) => b.citedByCount - a.citedByCount)
       .slice(0, 4);
     for (const paper of members) {
-      refs.push({ n: refs.length + 1, paper });
+      refs.push({ n: refs.length + 1, paper, anomaly: detectRefAnomaly(paper) });
     }
   }
   const papers = refs.map(({ n, paper }) => ({
@@ -177,13 +199,30 @@ export function reviewToMarkdown(
     lines.push(`- ${gate.name}：${GATE_VERDICT_LABEL[gate.verdict]} — ${gate.detail}`);
   }
   lines.push("");
-  lines.push("## 参考文献（GB/T 7714）", "");
-  for (const { n, paper } of refs) {
-    lines.push(formatGB7714(paper, n));
+  // S6 引用门禁：参考文献表只列正文实际引用过的编号，未引用的单独列为候选
+  const citedText = [
+    ...review.sections.map((s) => s.body),
+    review.gaps,
+    review.selfCheck,
+    review.limitation,
+  ].join("\n");
+  const citedNs = new Set([...citedText.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+  const citedRefs = refs.filter((ref) => citedNs.has(ref.n));
+  const uncitedRefs = refs.filter((ref) => !citedNs.has(ref.n));
+  lines.push("## 参考文献（GB/T 7714，仅正文实际引用）", "");
+  for (const { n, paper, anomaly } of citedRefs) {
+    lines.push(formatGB7714(paper, n) + (anomaly ? `（提示：${anomaly}）` : ""));
+  }
+  if (uncitedRefs.length > 0) {
+    lines.push("", "## 候选但未引用", "");
+    for (const { n, paper, anomaly } of uncitedRefs) {
+      lines.push(formatGB7714(paper, n) + (anomaly ? `（提示：${anomaly}）` : ""));
+    }
+    lines.push("", "以上编号文献进入候选但正文未引用，不计入参考文献表；如需引用请先核对全文。");
   }
   lines.push("", "---", "");
   lines.push(
-    `由 ${model ?? "大模型"} 基于 TopicScope 当前检索样本生成。草稿中的 [n] 与参考文献一一对应，但综合判断未经全文核对，提交或引用前请逐条核实。写作纪律改编自 HKUSTDial/Supervisor-Skills（CC-BY-4.0）。`,
+    `由 ${model ?? "大模型"} 基于 TopicScope 当前检索样本生成。草稿中的 [n] 对应候选编号文献，参考文献表只列正文实际引用的条目；综合判断未经全文核对，提交或引用前请逐条核实。写作纪律改编自 HKUSTDial/Supervisor-Skills（CC-BY-4.0）。`,
   );
   return lines.join("\n");
 }

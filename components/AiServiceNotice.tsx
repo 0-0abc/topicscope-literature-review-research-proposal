@@ -23,6 +23,13 @@ const COPY: Record<Exclude<ProbeStatus, "ready">, { title: string; detail: strin
       "模型接口拒绝了当前 Secret，请联系站点维护者更新 QWEN_API_KEY。为避免反复失败，这里不再重试。" +
       "本地分析功能照常可用。",
   },
+  access_denied: {
+    title: "访问 AI 服务被拒绝",
+    detail:
+      "请求被网关拦截或权限受限（HTTP 403），这不是站点故障，也不是后端没有部署。" +
+      "请检查当前网络环境或访问权限，必要时联系站点维护者核对网关配置。" +
+      "检索、方向雷达、指标口径对齐、文献库与证据卡、研究档案等本地功能不受影响，照常可用。",
+  },
   error: {
     title: "暂时连不上 AI 服务",
     detail: "网络或后端暂时不可用。可以稍后刷新重试；本地分析功能不受影响。",

@@ -155,6 +155,73 @@ export function parsePlan(raw: unknown): ResearchPlan | null {
   };
 }
 
+/**
+ * M6 禁代猜：用户没有提供的具体资源（算力型号、数据集名、工期）
+ * 不允许模型替用户猜。扫描正文，收集未授权的资源词。
+ */
+const UNAUTHORIZED_RESOURCE_RE =
+  /\b(?:A100|V100|H100|RTX|BraTS|KITTI|ImageNet|COCO|COO)\b|\bGPU\s*\d+|\d+\s*(?:周|个月)/gi;
+
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, "");
+}
+
+/**
+ * 返回正文里出现、但用户约束/资源没有覆盖的具体资源词（去重，保留原文写法）。
+ * authorizedTexts 传入用户填写的约束值与登记资源名；约束为空时所有命中都算代猜。
+ */
+export function findUnauthorizedResourceTerms(
+  plan: ResearchPlan,
+  authorizedTexts: string[],
+): string[] {
+  const authorized = normalizeForMatch(authorizedTexts.join("\n"));
+  const hits = new Map<string, string>();
+  for (const section of PLAN_SECTIONS) {
+    const text = plan.sections[section.key];
+    if (!text) continue;
+    UNAUTHORIZED_RESOURCE_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = UNAUTHORIZED_RESOURCE_RE.exec(text)) !== null) {
+      const term = match[0].trim();
+      if (!term) continue;
+      const key = normalizeForMatch(term);
+      if (authorized.includes(key)) continue;
+      if (!hits.has(key)) hits.set(key, term);
+    }
+  }
+  return [...hits.values()];
+}
+
+/** 14/15 节不允许留空壳：为空或只有占位句时视为需要填充。 */
+export function isPlaceholderSection(text: string): boolean {
+  const trimmed = text.trim().replace(/。$/, "");
+  return (
+    !trimmed ||
+    trimmed === "当前材料无法判断" ||
+    trimmed === "暂无" ||
+    trimmed === "无" ||
+    trimmed === "待补充"
+  );
+}
+
+/** 用 resolvePlanEvidence 的结果生成第 15 节正文，替代占位句。 */
+export function buildEvidenceIndexText(resolved: {
+  items: EvidenceItem[];
+  unknown: string[];
+}): string {
+  const lines: string[] = [];
+  for (const item of resolved.items) {
+    lines.push(`- ${item.id}：${item.label} = ${item.value}（来源：${item.origin}）`);
+  }
+  for (const id of resolved.unknown) {
+    lines.push(`- ${id}：不在证据白名单内，该引用无法核对，需人工核实。`);
+  }
+  if (lines.length === 0) {
+    return "模型未给出任何证据引用，本节无法建立索引；请重新生成或人工补充可核对的证据。";
+  }
+  return lines.join("\n");
+}
+
 /** 把证据 ID 解析成条目，分开列出模型编造的引用。 */
 export function resolvePlanEvidence(
   evidenceIds: string[],

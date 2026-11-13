@@ -1,5 +1,6 @@
 import { VERDICT_META, type CoverageVerdict, type RadarResult, type TopicCluster } from "./radar";
 import type { SearchReport } from "../data/types";
+import { filterOnTopic } from "../data/relevance";
 import { percent } from "../format";
 
 /** 每种判定对应的下一步动作，规则来自判定阈值，不是模型生成；结论均为样本内口径，需独立检索验证。 */
@@ -28,8 +29,17 @@ export interface AdvisorReportData {
 
 export function buildAdvisorReport(radar: RadarResult, report: SearchReport | null): AdvisorReportData {
   const query = report?.job.rawQuestion ?? "";
+  // 摘要覆盖不足一半时不做正式推荐：判定只反映标题/关键词分布，噪声太大
+  const coverageOk = (report?.abstractCoverage ?? 100) >= 50;
   const ranked = radar.clusters
-    .filter((c) => c.size > 3 && OPPORTUNITY[c.verdict] > 0)
+    .filter(
+      (c) =>
+        c.size >= 10 &&
+        c.verdict !== "insufficient" &&
+        c.verdict !== "gap" &&
+        coverageOk &&
+        OPPORTUNITY[c.verdict] > 0,
+    )
     .sort((a, b) => OPPORTUNITY[b.verdict] - OPPORTUNITY[a.verdict] || a.crowding - b.crowding);
   const candidates = ranked.slice(0, 3);
   const avoid = radar.clusters.filter(
@@ -66,10 +76,12 @@ function toMarkdown(
     lines.push(`- 统计证据：样本 ${c.size} 篇、占 ${percent(c.sizeShare)}；样本内近三年占比 ${percent(c.recentShare, 0)}；被引中位数 ${c.citationMedian}；摘要覆盖 ${c.abstractCoverage}%。`);
     lines.push(`- 判定依据：${c.verdictReason}`);
     lines.push(`- 下一步建议：${NEXT_STEP[c.verdict]}`);
-    lines.push(`- 边界说明：${VERDICT_META[c.verdict].cannotConclude}`);
-    if (c.topPapers.length > 0) {
-      lines.push("- 代表文献（按被引排序，需自行核对全文）：");
-      for (const p of c.topPapers.slice(0, 3)) {
+    lines.push(`- 边界说明：${c.cannotConclude}`);
+    // 代表文献先过统一 relevance gate（M5），避免把检索词之外的噪声簇论文递给导师
+    const representatives = filterOnTopic(c.topPapers, query).slice(0, 3);
+    if (representatives.length > 0) {
+      lines.push("- 代表文献（按被引排序、已按检索词过滤，需自行核对全文）：");
+      for (const p of representatives) {
         lines.push(`  - ${p.title}（${p.year}${p.venue ? `，${p.venue}` : ""}）${p.doi ? ` DOI: ${p.doi}` : ""}`);
       }
     }
@@ -87,10 +99,16 @@ function toMarkdown(
   lines.push("## 四、材料与局限", "");
   if (report) {
     lines.push(`- ${report.sampleFrame}`);
-    for (const limitation of report.limitations) lines.push(`- ${limitation}`);
+    // 与样本框同文/互相包含的局限条目不再重复列出
+    const frame = report.sampleFrame.trim();
+    for (const limitation of report.limitations) {
+      const item = limitation.trim();
+      if (item === frame || item.includes(frame) || frame.includes(item)) continue;
+      lines.push(`- ${limitation}`);
+    }
   }
   lines.push("- 以上占比与拥挤度只反映当前检索样本，不等于真实领域产出比例。");
-  lines.push("- 「增长窗口」等判定只表示样本内近期占比高，固定按年采样的样本不能证明真实发文增长；所有方向判断需独立检索验证。", "");
+  lines.push("- 「增长窗口」等判定只表示当前样本框（见检索快照）内近期占比高，不能证明真实发文增长；所有方向判断需独立检索验证。", "");
   lines.push("---", "");
   lines.push("本汇报由 TopicScope 按公开判定规则从检索样本统计生成，未经模型改写，也不构成领域真实密度结论；与导师讨论前请核对代表文献全文。");
   return lines.join("\n");

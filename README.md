@@ -18,7 +18,7 @@
 | 研究方案 | 按用户约束生成 15 节方案 + 五项评分 + 逻辑链自洽检查，资源可得性登记，导出 Markdown |
 | 研究档案 | 会话存档（IndexedDB）：保存 / 载入 / 合并 / 导入导出，断网可重看 |
 
-当前为七个平铺页签，导航仍在收敛中，结构可能继续合并调整。
+当前为五组主导航：检索与雷达 / 论文与证据 / 研究对话 / 方案与档案（内嵌 文献综述·选题体检·研究方案·研究档案 四个子页）/ 指标口径对齐。上表按功能模块列出，与导航分组对应。
 
 ## 架构
 
@@ -27,7 +27,7 @@
 - **`src/`**：入口。`main.tsx`、`App.tsx`（页签编排与全局状态接线）、`globals.css`。路径别名 `@` 指向项目根目录，`components/`、`hooks/`、`lib/` 都在根下。
 - **`components/`**：UI 层。各页签视图（RadarView / AlignView / LibraryView / ReviewGenerator / FeasibilityChecker / PlanGenerator / SessionArchive 等）、证据卡与共现图，`ui/` 为 shadcn 基础组件。
 - **`hooks/`**：状态层。`useCorpus`（检索 + 分析流水线）、`useEvidenceStore`（证据标注，localStorage）、`useSessionStore`（研究档案，IndexedDB）、`useScoreContext`（评分拆解）、`useFunctionProbe`（AI 服务状态探测）。
-- **`lib/data/`**：检索适配。`retrieval.ts` 主流程为 本地缓存（同一检索词 12 小时）→ OpenAlex 主源 → Crossref 降级（无主题标签、判定偏粗，界面明示）；另有去重、DOI 归一、离线快照加载与类型。
+- **`lib/data/`**：检索适配。`retrieval.ts` 主流程为 本地缓存（同一检索词 12 小时）→ 站点服务端 Function（OpenAlex 主源 + Semantic Scholar 第二主源合并，Crossref 兜底，服务端共享缓存 12 小时）→ 浏览器直连 OpenAlex/Crossref 仅作兜底；另有去重、DOI 归一、离线快照加载与类型。
 - **`lib/analysis/`**：分词 → TF-IDF → 球面 k-means（固定种子可复现）→ `radar.ts` 聚类与覆盖判定；`cooccurrence.ts` 共现图（lift 筛选）；`scoring.ts` 六维评分；`advisorReport.ts` 规则生成的导师汇报。
 - **`lib/metrics/`**：26 个指标的实现与口径注册表、换算规则与「不可互推」清单；`selfcheck.ts` 50 个自检用例，期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，不共用代码路径。
 - **`lib/ai/`**：四个生成器 `directions` / `review` / `feasibility` / `plan`。负责构造发送载荷（统计数字 + 证据 ID 白名单 + 编号文献）、客户端解析与校验（`parseSuggestions` / `parseReview` / `parseFeasibility` / `parsePlan`）、证据回查、综述质量门禁、体检完整性自检与 Markdown 导出。
@@ -36,7 +36,7 @@
 ## 数据与隐私
 
 - **分析全部在浏览器本地**：聚类、覆盖判定、共现、评分、指标换算不上传任何文献内容。
-- **在线检索**只把检索词发往 OpenAlex / Crossref；命中本地缓存时不发请求。
+- **在线检索**把检索词发往站点服务端 Function，由服务端请求 OpenAlex 主源 + Semantic Scholar 第二主源（Crossref 兜底），服务端共享缓存 12 小时；命中缓存时不重复请求上游。
 - **AI 生成**（方向建议 / 综述 / 体检 / 方案）把统计数字、论文标题与摘要节选、以及你勾选的已核对证据，经同源 Function 发送到站点自带的模型服务；模型 key 不在前端。
 - **本机存储**：研究档案存 IndexedDB（`topicscope`），证据标注、检索缓存、可选 OpenAlex key 存 localStorage。
 - 服务端 Secret 不进入站点代码、构建产物或任何响应。
@@ -48,7 +48,7 @@
 | `QWEN_API_KEY` | 服务端 Secret，在 Qoder Sites 站点设置里填写 | AI 功能必需。未配置时前端按 `status` 探测显示原因，本地功能照常可用 |
 | `QWEN_MODEL` | 服务端环境变量，可选 | 默认 `qwen3.8-flash` |
 | `QWEN_BASE_URL` | 服务端环境变量，可选 | 缺省按一组可信的千问兼容地址依次尝试 |
-| OpenAlex API key | 页面「设置」里填写，只存本机 localStorage | 可选。不填也能检索（免费额度按 IP 计，较小）；额度受限时自动降级 Crossref |
+| OpenAlex API key | 站点服务端 Secret `OA_API_KEY`（站点设置里配置） | 服务端默认使用，访客无需自备 key；Semantic Scholar 第二主源匿名池限流时自动降级为仅主源 |
 
 ## 本地运行
 

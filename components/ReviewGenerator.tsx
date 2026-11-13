@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ApiError, requestJson } from "@/lib/api";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
@@ -51,12 +52,27 @@ export function ReviewGenerator({ context, radar, byId, report, initialResult, o
 
   const prepared = useMemo(() => {
     if (!context || !radar || radar.clusters.length === 0) return null;
-    return buildReviewPayload(context, radar, byId);
-  }, [context, radar, byId]);
+    return buildReviewPayload(context, radar, byId, report);
+  }, [context, radar, byId, report]);
+
+  // S6：正文（含空白/自检/局限）实际引用过的编号；未引用的单独列为候选
+  const citedNs = useMemo(() => {
+    if (!review) return new Set<number>();
+    const text = [
+      ...review.sections.map((s) => s.body),
+      review.gaps,
+      review.selfCheck,
+      review.limitation,
+    ].join("\n");
+    return new Set([...text.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+  }, [review]);
 
   if (available !== "ready") {
     return <AiServiceNotice status={available} feature="文献综述生成" />;
   }
+
+  const citedRefs = refs.filter((ref) => citedNs.has(ref.n));
+  const uncitedRefs = refs.filter((ref) => !citedNs.has(ref.n));
 
   const generate = async () => {
     if (!prepared) return;
@@ -92,8 +108,8 @@ export function ReviewGenerator({ context, radar, byId, report, initialResult, o
         <div className="space-y-1">
           <h2 className="heading-cn text-base">文献综述草稿生成器</h2>
           <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-            把当前检索样本按方向综合成综述草稿：每个方向选被引最高的 4 篇（共最多 24 篇），
-            模型只允许引用这些编号文献，[n] 与文末 GB/T 7714 参考文献一一对应。
+            把当前检索样本按方向综合成综述草稿：每个方向先按检索词过滤相关性，再选被引最高的 4 篇（共最多 24 篇），
+            模型只允许引用这些编号文献；参考文献表只列正文实际引用的 [n]，未引用的单独列为候选。
             措辞按证据强度校准，生成后附本地质量门禁与自我对抗检查。草稿是起点，不是成品。
           </p>
         </div>
@@ -175,15 +191,27 @@ export function ReviewGenerator({ context, radar, byId, report, initialResult, o
           ) : null}
 
           <section className="space-y-1.5 rounded-md bg-muted px-4 py-3">
-            <h4 className="heading-cn text-sm">参考文献（GB/T 7714）</h4>
+            <h4 className="heading-cn text-sm">参考文献（GB/T 7714，仅正文实际引用）</h4>
             <ol className="space-y-1">
-              {refs.map(({ n, paper }) => (
-                <li key={n} className="text-[11px] leading-relaxed text-muted-foreground">
-                  {formatGB7714(paper, n)}
-                </li>
+              {citedRefs.map((refEntry) => (
+                <RefItem key={refEntry.n} refEntry={refEntry} />
               ))}
             </ol>
           </section>
+
+          {uncitedRefs.length > 0 ? (
+            <section className="space-y-1.5 rounded-md border border-dashed border-border px-4 py-3">
+              <h4 className="heading-cn text-sm">候选但未引用</h4>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                以下编号文献进入候选但正文未引用，不计入参考文献表；如需引用请先核对全文。
+              </p>
+              <ol className="space-y-1">
+                {uncitedRefs.map((refEntry) => (
+                  <RefItem key={refEntry.n} refEntry={refEntry} />
+                ))}
+              </ol>
+            </section>
+          ) : null}
 
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             由 {model ?? "大模型"} 基于当前检索样本生成。
@@ -193,6 +221,27 @@ export function ReviewGenerator({ context, radar, byId, report, initialResult, o
         </div>
       ) : null}
     </div>
+  );
+}
+
+function RefItem({ refEntry }: { refEntry: ReviewRef }) {
+  const { n, paper, anomaly } = refEntry;
+  return (
+    <li className="text-[11px] leading-relaxed text-muted-foreground">
+      {formatGB7714(paper, n)}
+      {anomaly ? (
+        <>
+          <Badge
+            variant="outline"
+            className="ml-1.5 rounded-sm align-middle text-[10px]"
+            title={anomaly}
+          >
+            来源存疑
+          </Badge>
+          <span className="ml-1">（{anomaly}）</span>
+        </>
+      ) : null}
+    </li>
   );
 }
 

@@ -1,5 +1,96 @@
 import type { BinaryCounts, ClassCounts, ClassStat, ConfusionMatrix } from "./types";
 
+/** 输入校验结果：errors 为可直接展示给用户的行内提示。 */
+export interface InputValidation {
+  ok: boolean;
+  errors: string[];
+}
+
+const BINARY_COUNT_FIELDS: { key: keyof BinaryCounts; label: string }[] = [
+  { key: "tp", label: "TP 真正例" },
+  { key: "fp", label: "FP 假正例" },
+  { key: "fn", label: "FN 假负例" },
+  { key: "tn", label: "TN 真负例" },
+];
+
+/** 单个计数必须是有限的非负整数；返回 null 表示合法。 */
+function countError(label: string, value: unknown): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return `${label} 不是有效数字`;
+  }
+  if (value < 0) return `${label} 不能为负数（当前 ${value}）`;
+  if (!Number.isInteger(value)) return `${label} 必须是整数（当前 ${value}）`;
+  return null;
+}
+
+/**
+ * 计算前的输入校验（S1）：二分类计数 {tp,fp,fn,tn} 或多分类混淆矩阵 {labels,m}。
+ *
+ * 规则：四个计数（矩阵为每个单元格）都是非负整数，且样本总数 N > 0。
+ * 非法时返回 ok:false 与逐条原因，调用方必须停止计算——
+ * 负数被静默截断、小数被当成计数、N=0 时算出的 0 都会伪装成「有效指标」。
+ */
+export function validateConfusionMatrix(
+  values: BinaryCounts | ConfusionMatrix,
+): InputValidation {
+  const errors: string[] = [];
+  if (!values || typeof values !== "object") {
+    return { ok: false, errors: ["缺少混淆矩阵或二分类计数输入"] };
+  }
+
+  // 多分类混淆矩阵：先校验形状，再逐格校验计数。
+  if ("m" in values) {
+    const labels = values.labels;
+    const rows = values.m;
+    if (!Array.isArray(labels) || labels.length === 0) {
+      errors.push("类别标签不能为空");
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      errors.push("混淆矩阵不能为空");
+    }
+    if (errors.length > 0) return { ok: false, errors };
+
+    const size = labels.length;
+    if (rows.length !== size) {
+      errors.push(`矩阵行数（${rows.length}）与类别数（${size}）不一致`);
+    }
+    let total = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row)) {
+        errors.push(`第 ${i + 1} 行不是数组`);
+        continue;
+      }
+      if (row.length !== size) {
+        errors.push(`第 ${i + 1} 行的列数（${row.length}）与类别数（${size}）不一致`);
+      }
+      for (let j = 0; j < row.length; j++) {
+        const label = `真实「${labels[i] ?? i + 1}」预测「${labels[j] ?? j + 1}」的计数`;
+        const error = countError(label, row[j]);
+        if (error) errors.push(error);
+        else total += row[j] as number;
+      }
+    }
+    if (errors.length === 0 && total <= 0) {
+      errors.push("样本总数 N 必须大于 0（当前矩阵全为 0）");
+    }
+    return { ok: errors.length === 0, errors };
+  }
+
+  // 二分类计数：tp / fp / fn / tn。
+  let total = 0;
+  for (const field of BINARY_COUNT_FIELDS) {
+    const value = values[field.key];
+    const error = countError(field.label, value);
+    if (error) errors.push(error);
+    else total += value as number;
+  }
+  if (errors.length === 0 && total <= 0) {
+    errors.push("样本总数 N 必须大于 0（TP+FP+FN+TN = 0）");
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 export function matrixTotal(matrix: ConfusionMatrix): number {
   let total = 0;
   for (const row of matrix.m) for (const value of row) total += value;

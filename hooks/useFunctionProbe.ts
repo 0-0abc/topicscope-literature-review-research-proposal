@@ -10,6 +10,7 @@ export type ProbeStatus =
   | "not_deployed"
   | "not_configured"
   | "auth_failed"
+  | "access_denied"
   | "error";
 
 export function useFunctionProbe(path = "/functions/v1/app/status"): ProbeStatus {
@@ -28,7 +29,13 @@ export function useFunctionProbe(path = "/functions/v1/app/status"): ProbeStatus
           setStatus("not_deployed");
           return;
         }
+        if (response.status === 403) {
+          // 网关拦截或权限受限：不是站点故障，单独归类以便给出针对性说明。
+          setStatus("access_denied");
+          return;
+        }
         if (!response.ok) {
+          // 5xx 及其余非 2xx：后端/网关异常。
           setStatus("error");
           return;
         }

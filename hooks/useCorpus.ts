@@ -147,7 +147,7 @@ export function useCorpus() {
           setState((prev) => ({
             ...prev,
             status: "error",
-            error: `「${trimmed}」没有返回相关结果，换个说法试试。`,
+            error: `未检索到「${trimmed}」相关结果，换个说法试试`,
           }));
           return;
         }

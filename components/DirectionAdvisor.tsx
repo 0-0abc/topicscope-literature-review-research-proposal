@@ -13,6 +13,7 @@ import {
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
 import { downloadText } from "@/lib/export";
+import { auditTextNumbers, buildNumericWhitelist } from "@/lib/ai/grounding";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "AI 建议暂时不可用：服务端还没有配置模型接口的 key。",
@@ -139,6 +140,12 @@ export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
             const resolved = context
               ? resolveEvidence(suggestion.evidenceIds, context)
               : { items: [], unknown: [] };
+            const unmatchedNumbers = context
+              ? auditTextNumbers(
+                  [suggestion.question, suggestion.why, suggestion.entry, suggestion.evidence, suggestion.cost].join(" "),
+                  buildNumericWhitelist(context),
+                )
+              : [];
             return (
               <Card key={`${suggestion.title}-${index}`} className="gap-2 rounded-md border-border py-4 shadow-none">
                 <CardContent className="space-y-2.5 px-4">
@@ -150,10 +157,14 @@ export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
                       可做性 {suggestion.feasibility}/5
                     </Badge>
                     <Badge
-                      variant={grounded ? "secondary" : "destructive"}
+                      variant={grounded ? (unmatchedNumbers.length > 0 ? "outline" : "secondary") : "destructive"}
                       className="rounded-sm"
                     >
-                      {grounded ? "引用可定位 · 内容仍需核验" : "引用无法定位"}
+                      {grounded
+                        ? unmatchedNumbers.length > 0
+                          ? "证据可定位 · 正文数字需核对"
+                          : "证据与数字可定位 · 内容仍需核验"
+                        : "引用无法定位"}
                     </Badge>
                     {onCheckupIdea ? (
                       <Button
@@ -172,6 +183,11 @@ export function DirectionAdvisor({ context, onCheckupIdea }: Props) {
                   <Line label="需要准备" value={suggestion.evidence} />
                   <Line label="成本" value={suggestion.cost} />
                   <Line label="风险" value={suggestion.risk} />
+                  {unmatchedNumbers.length > 0 ? (
+                    <p className="rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive">
+                      正文数字未核对：{unmatchedNumbers.join("、")}（不在本次送入的统计/共现白名单内，请人工核实后再引用）
+                    </p>
+                  ) : null}
                   <div className="space-y-1">
                     <p className="label-caps">引用的证据</p>
                     <div className="flex flex-wrap gap-1.5">
