@@ -733,7 +733,8 @@ function testEvidenceMerge({ mergeEvidenceNotes, EVIDENCE_FIELDS, useEvidenceSto
 // 6. handler 服务端检索 functions/handler.ts（自包含 Deno 风格函数，不 import lib）
 //    esbuild bundle（platform:'neutral'）+ banner 注入 globalThis.Deno，
 //    覆写 globalThis.fetch 按 hostname 分发 OpenAlex / Semantic Scholar / Crossref mock。
-//    每个 case 用不同 query，避免 12h 共享缓存串扰；S2 持续 429 会真实退避等待 2 秒。
+//    每个 case 用不同 query，避免 12h 共享缓存串扰；S2 持续 429 会真实退避等待 2 秒，
+//    且带 key 时相邻 S2 请求会被串行化到 ≥1.1 秒间隔（专属速率 1 次/秒）。
 // ---------------------------------------------------------------------------
 
 /** 异步分组：与同步 group 共用 passed / failures 计数 */
@@ -746,7 +747,7 @@ async function groupAsync(name, fn) {
 }
 
 const DENO_BANNER =
-  `globalThis.Deno = { env: { get: (k) => ({ QWEN_API_KEY: "t", OA_API_KEY: "t" }[k]) }, serve: () => {} };`;
+  `globalThis.Deno = { env: { get: (k) => ({ QWEN_API_KEY: "t", OA_API_KEY: "t", S2_API_KEY: "t" }[k]) }, serve: () => {} };`;
 
 /** 打包自包含 handler：内存产物 -> 临时 .mjs -> 动态 import（不落盘到项目） */
 async function loadHandler() {
@@ -866,20 +867,26 @@ const UPSTREAM_HOSTS = ["api.openalex.org", "api.semanticscholar.org", "api.cros
 function installUpstreamMock() {
   const originalFetch = globalThis.fetch;
   const calls = [];
-  const scenario = { openalex: "ok", s2: "ok" };
-  globalThis.fetch = async (input) => {
+  const s2Requests = [];
+  const oaResponseAt = [];
+  const scenario = { openalex: "ok", s2: "ok", oaDelayMs: 0 };
+  globalThis.fetch = async (input, init) => {
     const href = String(input);
     calls.push(href);
     const url = new URL(href);
     if (url.hostname === "api.openalex.org") {
       if (scenario.openalex === "throw") throw new Error("mock: OpenAlex 网络不可达");
       if (scenario.openalex === "500") return new Response("upstream boom", { status: 500 });
+      if (scenario.oaDelayMs) await new Promise((resolve) => setTimeout(resolve, scenario.oaDelayMs));
       const sort = url.searchParams.get("sort") ?? "";
       const works = sort.startsWith("publication_date") ? OA_RECENT : OA_CLASSIC;
+      oaResponseAt.push(Date.now());
       return Response.json({ results: works, meta: { count: works.length } });
     }
     if (url.hostname === "api.semanticscholar.org") {
+      s2Requests.push({ at: Date.now(), key: init?.headers?.["x-api-key"] ?? null });
       if (scenario.s2 === "429") return new Response("rate limited", { status: 429 });
+      if (scenario.s2 === "empty") return Response.json({ data: [], total: 0 });
       return Response.json({ data: S2_PAPERS, total: S2_PAPERS.length });
     }
     if (url.hostname === "api.crossref.org") {
@@ -890,6 +897,8 @@ function installUpstreamMock() {
   return {
     calls,
     scenario,
+    s2Requests,
+    oaResponseAt,
     countCalls(host) {
       return calls.filter((href) => new URL(href).hostname === host).length;
     },
@@ -927,6 +936,11 @@ async function testHandlerServer() {
   const Q_FRESH = "regression cache probe";
   const Q_CR_500 = "regression crossref http500";
   const Q_CR_THROW = "regression crossref network";
+  const Q_S2_ANON = "regression s2 without key";
+  const Q_S2_EMPTY = "regression s2 zero hit";
+  const Q_S2_GAP_A = "regression s2 rate gap a";
+  const Q_S2_GAP_B = "regression s2 rate gap b";
+  const Q_PARALLEL = "regression parallel sources";
   let mergeCount = 0;
 
   try {
@@ -937,6 +951,7 @@ async function testHandlerServer() {
       eq(body.ok, true);
       eq(body.configured, true, "注入 QWEN_API_KEY => configured");
       eq(body.oaConfigured, true, "注入 OA_API_KEY => oaConfigured");
+      eq(body.s2Configured, true, "注入 S2_API_KEY => s2Configured");
       eq(body.upstream, "ready");
     });
 
@@ -989,6 +1004,25 @@ async function testHandlerServer() {
       eq(body.report.removedByDedup, 1);
       eq(mock.countCalls("api.openalex.org"), 2, "OpenAlex 高被引 + 最新两批各一次");
       eq(mock.countCalls("api.semanticscholar.org"), 1);
+      eq(mock.s2Requests.at(-1).key, "t", "配置 S2_API_KEY 时第二源请求应带 x-api-key 头");
+    });
+
+    await groupAsync("handler: 两个主源并行发起（S2 不等 OpenAlex 回来）", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      // 主源故意慢 1.5 秒：串行实现会让 S2 在 1.5 秒后才发起，并行实现则立刻发起
+      mock.scenario.oaDelayMs = 1500;
+      const s2Before = mock.s2Requests.length;
+      const oaBefore = mock.oaResponseAt.length;
+      const { status, body } = await search(Q_PARALLEL);
+      mock.scenario.oaDelayMs = 0;
+      eq(status, 200);
+      const s2At = mock.s2Requests[s2Before].at;
+      const oaAt = Math.min(...mock.oaResponseAt.slice(oaBefore));
+      ok(s2At < oaAt, `第二源应在主源响应前发起（S2 ${s2At} / OpenAlex ${oaAt}）`);
+      const s2Report = body.report.sourceReports.find((r) => r.source === "semanticscholar");
+      eq(s2Report.failed, false, "并行发起后第二源结果照常合并");
+      ok(body.papers.length > 0);
     });
 
     await groupAsync("handler: S2 持续 429 => 退避重试一次后仅主源", async () => {
@@ -1011,10 +1045,29 @@ async function testHandlerServer() {
       eq(s2Report.failed, true);
       eq(s2Report.returned, 0);
       ok(s2Report.error.includes("只来自 OpenAlex"), "应说明本次结果仅来自主源");
+      ok(s2Report.error.includes("HTTP 429"), "失败原因要带上游状态码，便于判断是限流还是故障");
       ok(body.papers.length > 0);
       eq(body.papers.length, 3, "OpenAlex 4 篇去重后 3 篇");
       ok(body.papers.every((p) => p.provenance.source === "openalex"), "429 时结果全部来自主源");
       ok(!body.detail.includes("Semantic Scholar 补充合并"));
+      ok(body.report.limitations.join("").includes("Semantic Scholar 暂不可用"), "第二源故障要在 limitations 里可见");
+    });
+
+    await groupAsync("handler: S2 成功但 0 命中 => 不报故障，如实说明只来自主源", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "empty";
+      const { status, body } = await search(Q_S2_EMPTY);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.degraded, false, "第二源 0 命中不算降级");
+      const s2Report = body.report.sourceReports.find((r) => r.source === "semanticscholar");
+      ok(s2Report, "0 命中的第二源也要留痕");
+      eq(s2Report.failed, false, "请求成功的 0 命中不是故障");
+      eq(s2Report.returned, 0);
+      ok(body.report.limitations.join("").includes("Semantic Scholar 未检索到匹配结果"), "应说明第二源没检索到");
+      ok(!body.report.limitations.join("").includes("暂不可用"), "0 命中不得报成不可用");
+      ok(body.papers.length > 0, "主源结果照常返回");
+      mock.scenario.s2 = "ok";
     });
 
     await groupAsync("handler: 相同 query 二次调用命中 12h 共享缓存", async () => {
@@ -1040,12 +1093,40 @@ async function testHandlerServer() {
       eq(forced.body.papers.length, mergeCount);
     });
 
+    await groupAsync("handler: 未配置 S2_API_KEY => 匿名请求不带 x-api-key", async () => {
+      const withKey = globalThis.Deno;
+      globalThis.Deno = { env: { get: (k) => ({ QWEN_API_KEY: "t", OA_API_KEY: "t" }[k]) }, serve: () => {} };
+      try {
+        const probe = await handler(new Request("https://site.test/functions/v1/app/status"));
+        eq((await probe.json()).s2Configured, false, "未注入 S2_API_KEY => s2Configured false");
+        const { status, body } = await search(Q_S2_ANON);
+        eq(status, 200);
+        eq(body.ok, true, "无 key 时第二源仍走匿名共享池");
+        eq(mock.s2Requests.at(-1).key, null, "无 key 不应发送 x-api-key 头");
+        ok(body.papers.length > 0);
+      } finally {
+        globalThis.Deno = withKey;
+      }
+    });
+
+    await groupAsync("handler: S2 相邻请求间隔 ≥1.1 秒（专属速率 1 次/秒）", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      const before = mock.s2Requests.length;
+      await search(Q_S2_GAP_A);
+      await search(Q_S2_GAP_B);
+      const recent = mock.s2Requests.slice(before);
+      eq(recent.length, 2, "两次新检索各打一次第二源");
+      const gap = recent[1].at - recent[0].at;
+      ok(gap >= 1050, `相邻 S2 请求应串行等待 ≥1.1 秒（实际 ${gap}ms）`);
+      eq(recent.every((r) => r.key === "t"), true, "两次请求都带 key");
+    });
+
     for (const [mode, query] of [["500", Q_CR_500], ["throw", Q_CR_THROW]]) {
       await groupAsync(`handler: OpenAlex ${mode} => 降级 Crossref`, async () => {
         mock.scenario.openalex = mode;
         mock.scenario.s2 = "ok";
         const oaBefore = mock.countCalls("api.openalex.org");
-        const s2Before = mock.countCalls("api.semanticscholar.org");
         const { status, body } = await search(query);
         eq(status, 200);
         eq(body.ok, true);
@@ -1069,7 +1150,7 @@ async function testHandlerServer() {
         ok(body.report.limitations.join("").includes("降级到 Crossref"));
         ok(body.detail.includes("Crossref"));
         eq(mock.countCalls("api.openalex.org") - oaBefore, 2, "两批主源请求都失败后才降级");
-        eq(mock.countCalls("api.semanticscholar.org") - s2Before, 0, "降级路径不再打第二源");
+        ok(!sources.includes("semanticscholar"), "降级路径不采用第二源结果（并行发起但丢弃）");
       });
     }
 

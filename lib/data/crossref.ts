@@ -4,7 +4,7 @@ import { normalizeDoi } from "./doi";
 const CROSSREF_API = "https://api.crossref.org/works";
 
 /** Crossref 的 polite pool 同样需要一个可联系的邮箱。 */
-const CROSSREF_CONTACT = "209879754@qq.com";
+const CROSSREF_CONTACT = "131755982+0-0abc@users.noreply.github.com";
 
 interface CrossrefWork {
   DOI: string;

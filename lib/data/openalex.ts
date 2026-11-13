@@ -5,9 +5,9 @@ const OPENALEX_API = "https://api.openalex.org/works";
 
 /**
  * OpenAlex 的 polite pool 需要一个可联系的邮箱，请求会进入更宽松的队列。
- * 公开站点填写真实联系方式是 OpenAlex 官方推荐的做法。
+ * 用项目公开联系方式（GitHub noreply），不暴露个人邮箱。
  */
-const OPENALEX_CONTACT = "209879754@qq.com";
+const OPENALEX_CONTACT = "131755982+0-0abc@users.noreply.github.com";
 
 interface OpenAlexWork {
   id: string;

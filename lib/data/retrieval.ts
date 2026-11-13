@@ -148,7 +148,7 @@ export async function retrieve(
   }
 
   // 服务端检索优先：站点 Function 用 Secret 里的 key 检索（OpenAlex 主源 + Semantic Scholar
-  // 第二主源合并），结果在服务端缓存 12 小时供所有访客共享；静态部署（无后端）时回退浏览器直连。
+  // 第二主源并行请求，回来后合并去重），结果在服务端缓存 12 小时供所有访客共享；静态部署（无后端）时回退浏览器直连。
   const server = await serverSearch(trimmed, options.force === true);
   if (server) {
     // 服务端明确 0 命中：直接返回空结果，交给上层提示「未检索到」，不回退直连产出噪声。

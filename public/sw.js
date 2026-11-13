@@ -2,7 +2,9 @@
  * TopicScope 最小离线 Service Worker（原生 JS，零依赖）。
  *
  * 策略：
- *   - install：预缓存应用外壳（'/'、'/index.html'）与离线快照 JSON；
+ *   - install：预缓存应用外壳（'/'、'/index.html'）与离线快照 JSON，
+ *     并按构建产出的 /precache-manifest.json 全量预缓存 assets/fonts/data
+ *     （含懒加载 chunk），保证断网首次切换任何页签都能加载；
  *     快照路径与 lib/data/snapshot.ts 的 SNAPSHOT_URL 保持一致。
  *   - 导航请求：network-first，失败回退缓存的外壳，保证断网刷新/重开仍能加载。
  *   - 同源静态资源：cache-first + stale-while-revalidate（先返回缓存，后台更新）。
@@ -11,7 +13,7 @@
  *     避免把检索/AI 结果当成静态资源冻结。
  */
 
-const VERSION = "topicscope-v1";
+const VERSION = "topicscope-v2";
 const SHELL_CACHE = VERSION + "-shell";
 const ASSET_CACHE = VERSION + "-assets";
 const KEEP_CACHES = [SHELL_CACHE, ASSET_CACHE];
@@ -46,6 +48,20 @@ self.addEventListener("install", (event) => {
           }),
         ),
       );
+      // 全量预缓存构建产物（含懒加载 chunk），断网首次切页签也能加载。
+      try {
+        const manifest = await (await fetch("/precache-manifest.json")).json();
+        const assets = await caches.open(ASSET_CACHE);
+        await Promise.all(
+          (manifest.urls || []).map((url) =>
+            assets.add(url).catch((error) => {
+              console.warn("[sw] 资源预缓存失败:", url, error);
+            }),
+          ),
+        );
+      } catch (error) {
+        console.warn("[sw] 读取预缓存清单失败:", error);
+      }
       await self.skipWaiting();
     })(),
   );

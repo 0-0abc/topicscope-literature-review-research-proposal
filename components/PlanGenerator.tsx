@@ -28,6 +28,7 @@ import type { Paper, SearchReport } from "@/lib/data/types";
 import { downloadText, formatGB7714, researchPlanToMarkdown } from "@/lib/export";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
+import { Markdown } from "@/components/Markdown";
 import { EVIDENCE_FIELDS, type EvidenceNote } from "@/hooks/useEvidenceStore";
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -765,9 +766,10 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
               <figcaption className="label-caps mb-1">
                 逻辑链自洽检查（局限→想法→挑战→方法→结果）
               </figcaption>
-              <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
-                {plan.chainAudit}
-              </p>
+              <Markdown
+                text={plan.chainAudit}
+                className="text-[11px] leading-relaxed text-muted-foreground"
+              />
             </figure>
           ) : null}
 
@@ -831,9 +833,10 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
                   </span>
                   {section.title}
                 </h3>
-                <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                  {plan.sections[section.key] || "当前材料无法判断。"}
-                </p>
+                <Markdown
+                  text={plan.sections[section.key] || "当前材料无法判断。"}
+                  className="mt-1.5 text-xs leading-relaxed text-muted-foreground"
+                />
               </article>
             ))}
           </section>

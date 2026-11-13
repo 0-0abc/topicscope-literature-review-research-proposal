@@ -13,6 +13,7 @@ import { EVIDENCE_FIELDS } from "@/hooks/useEvidenceStore";
 import type { ChatMessage } from "@/hooks/useSessionStore";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
+import { Markdown } from "@/components/Markdown";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "研究对话暂时不可用：服务端还没有配置模型接口的 key。",
@@ -35,6 +36,8 @@ interface ChatRef {
 interface SentInput {
   clusterName: string | null;
   papers: { title: string; source: string }[];
+  /** 本次实际送入的人工核对字段（按论文编号），用于徽标区分「人工核对」与「摘要/标题」。 */
+  verified: { n: number; labels: string[] }[];
 }
 
 /**
@@ -170,6 +173,10 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
             title: p.title,
             source: verifiedIds.has(p.id) ? "摘要+人工核对" : "摘要",
           })),
+          verified: sentPapers
+            .map((p, i) => ({ n: i + 1, item: verified.find((v) => v.paperId === p.id) }))
+            .filter((x): x is { n: number; item: NonNullable<typeof x.item> } => !!x.item)
+            .map((x) => ({ n: x.n, labels: x.item.fields.map((f) => f.label) })),
         },
       }));
       onMessagesChange([
@@ -193,6 +200,16 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
   const titleOfRef = (messageIndex: number, n: number): string | null =>
     sentInputs[messageIndex]?.papers[n - 1]?.title ?? focusPapers[n - 1]?.title ?? null;
 
+  /** 徽标来源按真实送入内容判定：只有本次送过的人工核对字段才标「人工核对」。 */
+  const refSourceOf = (messageIndex: number, r: ChatRef): string => {
+    const labels = sentInputs[messageIndex]?.verified?.find((v) => v.n === r.n)?.labels;
+    if (r.field && labels?.includes(r.field)) return `${r.field}（人工核对）`;
+    if (r.field === "abstract") return "摘要";
+    if (r.field === "title") return "标题";
+    if (r.field === "year") return "年份";
+    return r.field ?? "摘要";
+  };
+
   const exportChat = () => {
     const lines: string[] = [`# 研究对话记录`, ""];
     lines.push(`- 检索式: ${report?.job.rawQuestion ?? "（离线样本）"}`);
@@ -207,7 +224,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
               m.refs
                 .map((r) => {
                   const title = titleOfRef(i, r.n);
-                  return `[${r.n}] ${title ?? `论文${r.n}`}${r.field ? ` · ${r.field}（人工核对）` : " · 摘要"}`;
+                  return `[${r.n}] ${title ?? `论文${r.n}`} · ${refSourceOf(i, r)}`;
                 })
                 .join("；"),
             "",
@@ -296,7 +313,11 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
                       : "space-y-2 rounded-md border border-border px-3 py-2 text-xs"
                   }
                 >
-                  <p className="whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                  {m.role === "assistant" ? (
+                    <Markdown text={m.content} className="leading-relaxed" />
+                  ) : (
+                    <p className="whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                  )}
                   {m.role === "assistant" ? (
                     <div className="space-y-1.5">
                       <div className="flex flex-wrap gap-1.5">
@@ -304,8 +325,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
                           const title = titleOfRef(i, r.n);
                           return (
                             <Badge key={j} variant="outline" className="rounded-sm text-[10px]">
-                              [{r.n}] {title ? title.slice(0, 24) : `论文${r.n}`}
-                              {r.field ? ` · ${r.field}（人工核对）` : " · 摘要"}
+                              [{r.n}] {title ? title.slice(0, 24) : `论文${r.n}`} · {refSourceOf(i, r)}
                             </Badge>
                           );
                         })}

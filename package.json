@@ -1,7 +1,9 @@
 {
-  "name": "qoder-site-react-starter",
+  "name": "topicscope",
   "version": "0.1.0",
   "private": true,
+  "description": "TopicScope · 选题雷达：科研选题工作台（方向雷达 / 指标口径对齐 / 可回查的综述、体检与研究方案）",
+  "homepage": "https://topicscope-piwbj3lryn1.qoder.zone",
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
   },

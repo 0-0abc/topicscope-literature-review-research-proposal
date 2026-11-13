@@ -948,7 +948,7 @@ interface ServerReport {
   retrievedAt: string;
 }
 
-const SEARCH_CONTACT = "209879754@qq.com";
+const SEARCH_CONTACT = "131755982+0-0abc@users.noreply.github.com";
 const SEARCH_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SEARCH_CACHE_MAX = 60;
 const SEARCH_RATE_MAX = 30;
@@ -1025,9 +1025,9 @@ function jatsText(value: unknown): string | null {
   return null;
 }
 
-async function fetchJsonWithTimeout(url: URL, timeoutMs = 15000): Promise<Response> {
+async function fetchJsonWithTimeout(url: URL, timeoutMs = 15000, extraHeaders?: Record<string, string>): Promise<Response> {
   return fetch(url, {
-    headers: { accept: "application/json" },
+    headers: { accept: "application/json", ...extraHeaders },
     signal: AbortSignal.timeout(timeoutMs),
   });
 }
@@ -1151,28 +1151,49 @@ function mapS2(work: S2Work, query: string, filter: string, retrievedAt: string)
   };
 }
 
-async function fetchS2(query: string, fromYear: number, toYear: number, retrievedAt: string, filter: string): Promise<{ papers: ServerPaper[]; returned: number } | null> {
-  try {
-    const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search");
-    url.searchParams.set("query", query);
-    url.searchParams.set("limit", "100");
-    url.searchParams.set("year", `${fromYear}-${toYear}`);
-    url.searchParams.set("fields", S2_FIELDS);
-    let response = await fetchJsonWithTimeout(url);
-    // S2 匿名池 100 次/5 分钟全站共享，429 高发；退避 2 秒重试一次，仍失败则降级为仅主源
-    if (response.status === 429) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      response = await fetchJsonWithTimeout(url);
+let s2Tail: Promise<unknown> = Promise.resolve();
+let s2LastAt = 0;
+/** S2 带 key 后限流 1 次/秒（全端点累计）：串行化请求并保证间隔 ≥1.1 秒。 */
+function s2Serialize<T>(fn: () => Promise<T>): Promise<T> {
+  const run = s2Tail.then(async () => {
+    const gap = s2LastAt + 1100 - Date.now();
+    if (gap > 0) await new Promise((resolve) => setTimeout(resolve, gap));
+    s2LastAt = Date.now();
+    return fn();
+  });
+  s2Tail = run.catch(() => undefined);
+  return run;
+}
+
+async function fetchS2(query: string, fromYear: number, toYear: number, retrievedAt: string, filter: string): Promise<{ papers: ServerPaper[]; returned: number; error?: string }> {
+  return s2Serialize(async () => {
+    try {
+      const url = new URL("https://api.semanticscholar.org/graph/v1/paper/search");
+      url.searchParams.set("query", query);
+      url.searchParams.set("limit", "100");
+      url.searchParams.set("year", `${fromYear}-${toYear}`);
+      url.searchParams.set("fields", S2_FIELDS);
+      // 站点 Secret S2_API_KEY：带 key 走 1 次/秒专属速率；未配置时退回匿名共享池
+      const s2Key = Deno.env.get("S2_API_KEY");
+      const headers = s2Key ? { "x-api-key": s2Key } : undefined;
+      let response = await fetchJsonWithTimeout(url, 15000, headers);
+      // 429 时退避 2 秒重试一次（仍满足 1 次/秒间隔），仍失败则降级为仅主源
+      if (response.status === 429) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        s2LastAt = Date.now();
+        response = await fetchJsonWithTimeout(url, 15000, headers);
+      }
+      if (!response.ok) return { papers: [], returned: 0, error: `HTTP ${response.status}` };
+      const body = (await response.json()) as { data?: S2Work[] };
+      const papers = (body.data ?? [])
+        .map((work) => mapS2(work, query, filter, retrievedAt))
+        .filter((p): p is ServerPaper => p !== null);
+      return { papers, returned: papers.length };
+    } catch (error) {
+      const timedOut = error instanceof Error && error.name === "TimeoutError";
+      return { papers: [], returned: 0, error: timedOut ? "请求超时" : "网络不可达" };
     }
-    if (!response.ok) return null;
-    const body = (await response.json()) as { data?: S2Work[] };
-    const papers = (body.data ?? [])
-      .map((work) => mapS2(work, query, filter, retrievedAt))
-      .filter((p): p is ServerPaper => p !== null);
-    return { papers, returned: papers.length };
-  } catch {
-    return null;
-  }
+  });
 }
 
 function mergeS2(primary: ServerPaper[], secondary: ServerPaper[]): { papers: ServerPaper[]; enriched: number; added: number } {
@@ -1320,6 +1341,8 @@ async function serverRetrieve(query: string): Promise<{
   const oaKey = Deno.env.get("OA_API_KEY") ?? undefined;
 
   try {
+    // 两个主源同时发起，谁都不等谁；S2 的 1 次/秒速率由 s2Serialize 内部排队保证
+    const s2Promise = fetchS2(query, fromYear, toYear, retrievedAt, s2Filter);
     const [classic, recent] = await Promise.all([
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "cited_by_count:desc"),
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "publication_date:desc"),
@@ -1353,7 +1376,7 @@ async function serverRetrieve(query: string): Promise<{
       return { papers: [], report, source: "openalex", degraded: false, detail: "未检索到相关结果，建议换检索词" };
     }
 
-    const s2 = await fetchS2(query, fromYear, toYear, retrievedAt, s2Filter);
+    const s2 = await s2Promise;
     const limitations: string[] = [];
     const sourceReports: ServerSourceReport[] = [];
     let merged = oaPapers;
@@ -1362,7 +1385,7 @@ async function serverRetrieve(query: string): Promise<{
       source: "openalex", filter: oaFilter, returned: oaPapers.length, failed: false,
       abstractCoverage: oaCov.abstractCoverage, oaCoverage: oaCov.oaCoverage,
     });
-    if (s2 && s2.papers.length > 0) {
+    if (s2.papers.length > 0) {
       const result = mergeS2(oaPapers, s2.papers);
       merged = result.papers;
       const s2Cov = serverCoverage(s2.papers);
@@ -1371,11 +1394,19 @@ async function serverRetrieve(query: string): Promise<{
         abstractCoverage: s2Cov.abstractCoverage, oaCoverage: s2Cov.oaCoverage,
       });
       limitations.push(`Semantic Scholar 作为第二主源合并：新增 ${result.added} 篇、为 ${result.enriched} 篇补齐摘要或开放全文链接。`);
+    } else if (!s2.error) {
+      // 第二源请求成功但 0 命中：这是「没检索到」，不是故障，不要报成不可用
+      sourceReports.push({
+        source: "semanticscholar", filter: s2Filter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0,
+      });
+      limitations.push("Semantic Scholar 未检索到匹配结果，本次结果只来自 OpenAlex。");
     } else {
+      const reason = `Semantic Scholar 暂不可用（${s2.error}），本次结果只来自 OpenAlex。`;
       sourceReports.push({
         source: "semanticscholar", filter: s2Filter, returned: 0, failed: true,
-        error: "Semantic Scholar 暂不可用，本次结果只来自 OpenAlex。", abstractCoverage: 0, oaCoverage: 0,
+        error: reason, abstractCoverage: 0, oaCoverage: 0,
       });
+      limitations.push(reason);
     }
 
     const before = merged.length;
@@ -1405,7 +1436,7 @@ async function serverRetrieve(query: string): Promise<{
       source: "openalex",
       degraded: false,
       detail: `在线检索（站点服务端）：OpenAlex ${oaPapers.length} 篇主源` +
-        (s2 && s2.papers.length > 0 ? ` + Semantic Scholar 补充合并` : "") +
+        (s2.papers.length > 0 ? ` + Semantic Scholar 补充合并` : "") +
         `，去重后 ${deduped.length} 篇；结果已缓存 12 小时供所有访客共享，不随访客数消耗上游额度。`,
     };
   } catch (oaError) {
@@ -1558,6 +1589,7 @@ export async function handler(request: Request): Promise<Response> {
         ok: true,
         configured: Boolean(Deno.env.get("QWEN_API_KEY")),
         oaConfigured: Boolean(Deno.env.get("OA_API_KEY")),
+        s2Configured: Boolean(Deno.env.get("S2_API_KEY")),
         upstream: upstreamAuthFailed ? "auth_failed" : "ready",
       },
       200,
