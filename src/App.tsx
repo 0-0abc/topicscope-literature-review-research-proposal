@@ -269,7 +269,7 @@ export default function App() {
       {/[\u4e00-\u9fff]/.test(query) ? (
         <div className="border-b border-border bg-muted/30">
           <div className="mx-auto max-w-6xl px-4 py-1.5 text-[11px] text-muted-foreground">
-            检测到中文检索词：OpenAlex / Semantic Scholar 以英文索引为主，中文召回可能偏少，建议改用英文术语（如「医学图像分割」→ medical image segmentation）。
+            检测到中文检索词：站点服务端会先把检索词译成英文（机器翻译可能有偏差），OpenAlex 用「英文|中文」并列检索、Crossref 按中文原题补充，三源并行合并去重；模型不可用时只用原词检索，中文召回可能偏少。
           </div>
         </div>
       ) : null}

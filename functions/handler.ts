@@ -1322,6 +1322,52 @@ function crossrefRelevant(paper: ServerPaper, tokens: string[]): boolean {
   return tokens.some((token) => haystack.includes(token));
 }
 
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9fff\uf900-\ufaff]/.test(text);
+}
+
+/** 中文滑窗三字组：Crossref 中文原题相关性过滤用，避免「整句子串」过严。 */
+function zhTrigrams(text: string): string[] {
+  const grams: string[] = [];
+  for (const part of text.replace(/[^\u3400-\u9fff\uf900-\ufaff]+/g, " ").split(" ")) {
+    if (part.length < 2) continue;
+    if (part.length === 2) grams.push(part);
+    else for (let i = 0; i + 3 <= part.length; i++) grams.push(part.slice(i, i + 3));
+  }
+  return [...new Set(grams)];
+}
+
+function zhRelevant(paper: ServerPaper, grams: string[]): boolean {
+  if (grams.length === 0) return true;
+  const haystack = `${paper.title} ${paper.abstract ?? ""}`;
+  return grams.some((gram) => haystack.includes(gram));
+}
+
+const TRANSLATE_SYSTEM_PROMPT = [
+  "你是学术文献检索翻译器。",
+  "把用户给的中文检索词翻译成 OpenAlex / Semantic Scholar 等英文索引常用的英文检索短语。",
+  '只输出一个 JSON 对象 {"en": "..."}；en 为 3~12 个英文单词的检索短语，保留领域术语与常用缩写，不要输出解释或其他文字。',
+].join("");
+
+/** 中文检索词 → 英文检索短语；模型不可用或输出不合规时返回 null，调用方退回原词。 */
+async function translateQuery(query: string): Promise<string | null> {
+  if (!containsCjk(query)) return null;
+  const apiKey = Deno.env.get("QWEN_API_KEY");
+  if (!apiKey) return null;
+  try {
+    const result = await callModel(apiKey, TRANSLATE_SYSTEM_PROMPT, { zh: query }, 200);
+    if ("error" in result) return null;
+    const match = result.content.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]) as { en?: unknown };
+    if (typeof parsed.en !== "string") return null;
+    const en = parsed.en.replace(/["'`]/g, " ").replace(/[\\{}[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+    return en.length >= 3 && !containsCjk(en) ? en : null;
+  } catch {
+    return null;
+  }
+}
+
 async function serverRetrieve(query: string): Promise<{
   papers: ServerPaper[];
   report: ServerReport;
@@ -1332,20 +1378,36 @@ async function serverRetrieve(query: string): Promise<{
   const retrievedAt = new Date().toISOString();
   const toYear = new Date().getFullYear();
   const fromYear = toYear - 7;
+  const isZh = containsCjk(query);
+  const enQuery = await translateQuery(query);
+  // 中文检索 = 中英双语并行：OpenAlex 用「英文|中文」OR 一并召回，S2 用英文（英文索引为主），
+  // Crossref 用中文原题补充中文期刊；译词与原词都写进 queryVariants/limitations。
+  const queryVariants = enQuery ? [query, enQuery] : [query];
+  const oaSearchValue = enQuery ? `${enQuery}|${query}` : query;
   const oaFilter = [
-    `title_and_abstract.search:${query}`,
+    `title_and_abstract.search:${oaSearchValue}`,
     `from_publication_date:${fromYear}-01-01`,
     `to_publication_date:${toYear}-12-31`,
   ].join(",");
-  const s2Filter = `semantic scholar search:${query}（${fromYear}–${toYear}）`;
+  const s2Filter = `semantic scholar search:${enQuery ?? query}（${fromYear}–${toYear}）`;
+  const crZhFilter = `query.bibliographic:${query}`;
   const oaKey = Deno.env.get("OA_API_KEY") ?? undefined;
 
+  let zhCrError: string | null = null;
+  const zhCrPromise: Promise<ServerPaper[]> = isZh
+    ? fetchCrossrefServer(query, retrievedAt, crZhFilter).catch((error) => {
+        zhCrError = error instanceof Error ? error.message : "未知错误";
+        return [] as ServerPaper[];
+      })
+    : Promise.resolve([] as ServerPaper[]);
+
   try {
-    // 两个主源同时发起，谁都不等谁；S2 的 1 次/秒速率由 s2Serialize 内部排队保证
-    const s2Promise = fetchS2(query, fromYear, toYear, retrievedAt, s2Filter);
-    const [classic, recent] = await Promise.all([
+    // 三个上游同时发起，谁都不等谁；S2 的 1 次/秒速率由 s2Serialize 内部排队保证
+    const s2Promise = fetchS2(enQuery ?? query, fromYear, toYear, retrievedAt, s2Filter);
+    const [classic, recent, zhCrPapers] = await Promise.all([
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "cited_by_count:desc"),
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "publication_date:desc"),
+      zhCrPromise,
     ]);
     const seen = new Map<string, OpenAlexWork>();
     for (const work of [...classic, ...recent]) {
@@ -1358,7 +1420,7 @@ async function serverRetrieve(query: string): Promise<{
       // 主源请求成功但 0 命中：这是「没检索到」，不是故障。不降级 Crossref、不产聚类，
       // 直接返回空结果让用户换检索词，避免把 Crossref 噪声当成领域样本下判定。
       const report: ServerReport = {
-        job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+        job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
         sourceReports: [
           { source: "openalex", filter: oaFilter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
         ],
@@ -1409,6 +1471,31 @@ async function serverRetrieve(query: string): Promise<{
       limitations.push(reason);
     }
 
+    if (isZh) {
+      if (zhCrError) {
+        sourceReports.push({
+          source: "crossref", filter: crZhFilter, returned: 0, failed: true,
+          error: `Crossref 中文补充不可用（${zhCrError}）`, abstractCoverage: 0, oaCoverage: 0,
+        });
+      } else {
+        const zhPapers = zhCrPapers.filter((paper) => zhRelevant(paper, zhTrigrams(query)));
+        const zhCov = serverCoverage(zhPapers);
+        sourceReports.push({
+          source: "crossref", filter: crZhFilter, returned: zhPapers.length, failed: false,
+          abstractCoverage: zhCov.abstractCoverage, oaCoverage: zhCov.oaCoverage,
+        });
+        if (zhPapers.length > 0) {
+          merged = [...merged, ...zhPapers];
+          limitations.push(`Crossref 按中文原题补充 ${zhPapers.length} 篇中文期刊论文，已并入去重。`);
+        }
+      }
+      if (enQuery) {
+        limitations.push(`中文检索词已译为英文「${enQuery}」：OpenAlex 用「英文|中文」并列检索、Semantic Scholar 用英文、Crossref 按中文原题补充；机器翻译可能有偏差。`);
+      } else {
+        limitations.push("自动翻译不可用（模型未配置或调用失败），本次只用中文原词检索；OpenAlex 与 Semantic Scholar 以英文索引为主，中文召回可能偏少。");
+      }
+    }
+
     const before = merged.length;
     const { papers: deduped, removed } = serverDedup(merged);
     const cov = serverCoverage(deduped);
@@ -1417,7 +1504,7 @@ async function serverRetrieve(query: string): Promise<{
     limitations.push(SEARCH_SAMPLE_FRAME);
 
     const report: ServerReport = {
-      job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+      job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
       sourceReports,
       totalBeforeDedup: before,
       totalAfterDedup: deduped.length,
@@ -1437,7 +1524,8 @@ async function serverRetrieve(query: string): Promise<{
       degraded: false,
       detail: `在线检索（站点服务端）：OpenAlex ${oaPapers.length} 篇主源` +
         (s2.papers.length > 0 ? ` + Semantic Scholar 补充合并` : "") +
-        `，去重后 ${deduped.length} 篇；结果已缓存 12 小时供所有访客共享，不随访客数消耗上游额度。`,
+        `，去重后 ${deduped.length} 篇；结果已缓存 12 小时供所有访客共享，不随访客数消耗上游额度。` +
+        (enQuery ? `中文检索词已译为英文「${enQuery}」，中英双语检索。` : ""),
     };
   } catch (oaError) {
     const reason = oaError instanceof Error ? oaError.message : "未知错误";
@@ -1448,7 +1536,7 @@ async function serverRetrieve(query: string): Promise<{
     const relevant = fetched.filter((paper) => crossrefRelevant(paper, tokens));
     if (relevant.length === 0) {
       const report: ServerReport = {
-        job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+        job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
         sourceReports: [
           { source: "openalex", filter: oaFilter, returned: 0, failed: true, error: reason, abstractCoverage: 0, oaCoverage: 0 },
           { source: "crossref", filter: crFilter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
@@ -1486,7 +1574,7 @@ async function serverRetrieve(query: string): Promise<{
       SEARCH_SAMPLE_FRAME,
     ];
     const report: ServerReport = {
-      job: { rawQuestion: query, queryVariants: [query], constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+      job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
       sourceReports: [
         { source: "openalex", filter: oaFilter, returned: 0, failed: true, error: reason, abstractCoverage: 0, oaCoverage: 0 },
         { source: "crossref", filter: crFilter, returned: deduped.length, failed: false, abstractCoverage: cov.abstractCoverage, oaCoverage: cov.oaCoverage },

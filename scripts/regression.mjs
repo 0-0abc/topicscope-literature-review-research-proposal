@@ -860,8 +860,13 @@ const CROSSREF_ITEMS = [
   crItem({ doi: "10.2000/cr2", title: "Crossref Fallback Paper Two", withAbstract: false, withPdf: false }),
   crItem({ doi: "10.2000/cr1", title: "Crossref Fallback Paper One Duplicate", withAbstract: true, withPdf: true }),
 ];
+/** 中文检索的 Crossref 夹具：1 篇含中文三字组的相关篇 + 1 篇无关篇（三字组过滤应留下 1 篇） */
+const ZH_CR_ITEMS = [
+  crItem({ doi: "10.3000/zh1", title: "基于深度学习的医学图像分割方法综述", withAbstract: true, withPdf: true }),
+  crItem({ doi: "10.3000/zh2", title: "城市交通流量预测的经济学分析", withAbstract: false, withPdf: false }),
+];
 
-const UPSTREAM_HOSTS = ["api.openalex.org", "api.semanticscholar.org", "api.crossref.org"];
+const UPSTREAM_HOSTS = ["api.openalex.org", "api.semanticscholar.org", "api.crossref.org", "maas.qianwenaiapi.com"];
 
 /** 覆写 globalThis.fetch：按 hostname 分发，scenario 可切换 S2 429 / OpenAlex 500 或抛错 */
 function installUpstreamMock() {
@@ -869,7 +874,7 @@ function installUpstreamMock() {
   const calls = [];
   const s2Requests = [];
   const oaResponseAt = [];
-  const scenario = { openalex: "ok", s2: "ok", oaDelayMs: 0 };
+  const scenario = { openalex: "ok", s2: "ok", model: "ok", oaDelayMs: 0 };
   globalThis.fetch = async (input, init) => {
     const href = String(input);
     calls.push(href);
@@ -890,7 +895,17 @@ function installUpstreamMock() {
       return Response.json({ data: S2_PAPERS, total: S2_PAPERS.length });
     }
     if (url.hostname === "api.crossref.org") {
+      const bibQuery = url.searchParams.get("query.bibliographic") ?? "";
+      if (/[\u3400-\u9fff]/.test(bibQuery)) {
+        return Response.json({ message: { items: ZH_CR_ITEMS, "total-results": ZH_CR_ITEMS.length } });
+      }
       return Response.json({ message: { items: CROSSREF_ITEMS, "total-results": CROSSREF_ITEMS.length } });
+    }
+    if (url.hostname === "maas.qianwenaiapi.com") {
+      if (scenario.model === "fail") return new Response("model boom", { status: 500 });
+      return Response.json({
+        choices: [{ message: { content: '{"en": "medical image segmentation"}' }, finish_reason: "stop" }],
+      });
     }
     throw new Error(`回归 mock 未覆盖的上游请求: ${href}`);
   };
@@ -1004,6 +1019,7 @@ async function testHandlerServer() {
       eq(body.report.removedByDedup, 1);
       eq(mock.countCalls("api.openalex.org"), 2, "OpenAlex 高被引 + 最新两批各一次");
       eq(mock.countCalls("api.semanticscholar.org"), 1);
+      eq(mock.countCalls("maas.qianwenaiapi.com"), 0, "英文检索不应调用翻译模型");
       eq(mock.s2Requests.at(-1).key, "t", "配置 S2_API_KEY 时第二源请求应带 x-api-key 头");
     });
 
@@ -1120,6 +1136,45 @@ async function testHandlerServer() {
       const gap = recent[1].at - recent[0].at;
       ok(gap >= 1050, `相邻 S2 请求应串行等待 ≥1.1 秒（实际 ${gap}ms）`);
       eq(recent.every((r) => r.key === "t"), true, "两次请求都带 key");
+    });
+
+    await groupAsync("handler: 中文检索词 => 译成英文后中英双语检索 + Crossref 中文补充", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      mock.scenario.model = "ok";
+      const Q_ZH = "中文检索回归 医学图像分割";
+      const { status, body } = await search(Q_ZH);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.cached, false);
+      eq(body.report.job.queryVariants, [Q_ZH, "medical image segmentation"], "原词与译词都要进 queryVariants");
+      const reports = body.report.sourceReports;
+      eq(reports.map((r) => r.source), ["openalex", "semanticscholar", "crossref"], "中文检索应带 Crossref 中文补充");
+      ok(reports[0].filter.includes("medical image segmentation|"), "OpenAlex 过滤式应同时含英文与中文");
+      const zhReport = reports[2];
+      eq(zhReport.failed, false);
+      eq(zhReport.returned, 1, "中文三字组过滤应留下 1 篇相关、滤掉 1 篇无关");
+      ok(body.report.limitations.join("").includes("已译为英文"), "要说明机器翻译与双语检索口径");
+      ok(body.report.limitations.join("").includes("Crossref 按中文原题补充 1 篇"));
+      eq(mock.countCalls("maas.qianwenaiapi.com"), 1, "翻译恰好调用一次模型");
+      eq(body.report.removedByDedup >= 1, true, "多源合并后应存在去重");
+      eq(body.papers.length, 5, "OA 4 篇 + S2 新增 1 篇 + Crossref 中文 1 篇 - 标题重复 1 篇");
+    });
+
+    await groupAsync("handler: 翻译模型失败 => 退回中文原词检索，Crossref 中文补充照常", async () => {
+      mock.scenario.model = "fail";
+      const Q_ZH_FAIL = "翻译失败回归 医学图像分割";
+      const { status, body } = await search(Q_ZH_FAIL);
+      mock.scenario.model = "ok";
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.report.job.queryVariants, [Q_ZH_FAIL], "失败时 queryVariants 只有原词");
+      ok(body.report.limitations.join("").includes("自动翻译不可用"), "要如实说明翻译不可用");
+      const zhReport = body.report.sourceReports.find((r) => r.source === "crossref");
+      ok(zhReport, "翻译失败时中文 Crossref 补充仍要留痕");
+      eq(zhReport.failed, false);
+      eq(zhReport.returned, 1);
+      ok(body.papers.length > 0);
     });
 
     for (const [mode, query] of [["500", Q_CR_500], ["throw", Q_CR_THROW]]) {
