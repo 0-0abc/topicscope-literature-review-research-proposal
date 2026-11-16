@@ -903,8 +903,21 @@ function installUpstreamMock() {
     }
     if (url.hostname === "maas.qianwenaiapi.com") {
       if (scenario.model === "fail") return new Response("model boom", { status: 500 });
+      // "echo"：把原词里的拉丁专有名词回显进译词，用来测「专有名词已核对保留」路径；
+      // 默认固定译词不含任何原词名词，用来测「译词缺失已补回」路径。
+      let en = "medical image segmentation";
+      if (scenario.model === "echo") {
+        try {
+          const req = JSON.parse(init?.body ?? "{}");
+          const zhRaw = typeof req?.messages?.[1]?.content === "string" ? JSON.parse(req.messages[1].content).zh ?? "" : "";
+          const latin = (zhRaw.match(/[A-Za-z][A-Za-z0-9+.\-]{1,}/g) ?? []).filter((t) => t.length >= 2);
+          if (latin.length > 0) en = `state space ${latin.join(" ")} segmentation`;
+        } catch {
+          // 保持默认译词
+        }
+      }
       return Response.json({
-        choices: [{ message: { content: '{"en": "medical image segmentation"}' }, finish_reason: "stop" }],
+        choices: [{ message: { content: JSON.stringify({ en }) }, finish_reason: "stop" }],
       });
     }
     throw new Error(`回归 mock 未覆盖的上游请求: ${href}`);
@@ -1175,6 +1188,33 @@ async function testHandlerServer() {
       eq(zhReport.failed, false);
       eq(zhReport.returned, 1);
       ok(body.papers.length > 0);
+    });
+
+    await groupAsync("handler: 译词丢失专有名词 => 核对后按原样补回检索词", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      mock.scenario.model = "ok"; // 固定译词 "medical image segmentation"，不含 mamba
+      const Q_ZH_NP = "中文专名回归 mamba 分割";
+      const { status, body } = await search(Q_ZH_NP);
+      eq(status, 200);
+      eq(body.report.job.queryVariants, [Q_ZH_NP, "medical image segmentation mamba"], "译词缺失的 mamba 应补回");
+      ok(body.report.sourceReports[0].filter.includes("segmentation mamba|"), "OpenAlex 双语过滤式应含补回的名词");
+      ok(body.report.limitations.join("").includes("译词缺失的专有名词 mamba 已按原样补回"), "核对结果要写进 limitations");
+      const s2FilterZh = body.report.sourceReports.find((r) => r.source === "semanticscholar");
+      ok(s2FilterZh.filter.includes("mamba"), "S2 的英文检索式也要带上补回的名词");
+    });
+
+    await groupAsync("handler: 译词已保留专有名词 => limitations 记录核对结果", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      mock.scenario.model = "echo"; // 译词回显原词里的拉丁名词
+      const Q_ZH_KEEP = "专名保留回归 nnU-Net mamba 分割";
+      const { status, body } = await search(Q_ZH_KEEP);
+      mock.scenario.model = "ok";
+      eq(status, 200);
+      eq(body.report.job.queryVariants, [Q_ZH_KEEP, "state space nnU-Net mamba segmentation"], "专有名词应原样保留");
+      ok(body.report.limitations.join("").includes("已在译词中核对保留"), "保留路径也要留痕");
+      ok(body.report.limitations.join("").includes("nnU-Net、mamba"));
     });
 
     for (const [mode, query] of [["500", Q_CR_500], ["throw", Q_CR_THROW]]) {

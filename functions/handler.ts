@@ -1346,11 +1346,32 @@ function zhRelevant(paper: ServerPaper, grams: string[]): boolean {
 const TRANSLATE_SYSTEM_PROMPT = [
   "你是学术文献检索翻译器。",
   "把用户给的中文检索词翻译成 OpenAlex / Semantic Scholar 等英文索引常用的英文检索短语。",
+  "原词中已有的英文专有名词（算法、模型、数据集、任务、指标缩写，如 nnU-Net、Mamba、BraTS、mIoU）必须原样保留英文写法，禁止意译或省略。",
   '只输出一个 JSON 对象 {"en": "..."}；en 为 3~12 个英文单词的检索短语，保留领域术语与常用缩写，不要输出解释或其他文字。',
 ].join("");
 
+/** 从检索词里抽出拉丁字母专有名词（算法/模型/数据集/缩写），译词必须原样保留它们。 */
+function properNouns(query: string): string[] {
+  const raw = query.match(/[A-Za-z][A-Za-z0-9+.\-]{1,}/g) ?? [];
+  return [...new Set(raw.map((token) => token.trim()))].filter((token) => token.length >= 2);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 核对译词：原词的专有名词若被译词丢掉/改写，按原样补回检索词并记录，避免意译毁掉召回。 */
+function ensureProperNouns(en: string, nouns: string[]): { en: string; restored: string[] } {
+  const restored: string[] = [];
+  for (const noun of nouns) {
+    const pattern = new RegExp(`\\b${escapeRegExp(noun)}\\b`, "i");
+    if (!pattern.test(en)) restored.push(noun);
+  }
+  return { en: restored.length > 0 ? `${en} ${restored.join(" ")}` : en, restored };
+}
+
 /** 中文检索词 → 英文检索短语；模型不可用或输出不合规时返回 null，调用方退回原词。 */
-async function translateQuery(query: string): Promise<string | null> {
+async function translateQuery(query: string): Promise<{ en: string; restored: string[] } | null> {
   if (!containsCjk(query)) return null;
   const apiKey = Deno.env.get("QWEN_API_KEY");
   if (!apiKey) return null;
@@ -1362,7 +1383,9 @@ async function translateQuery(query: string): Promise<string | null> {
     const parsed = JSON.parse(match[0]) as { en?: unknown };
     if (typeof parsed.en !== "string") return null;
     const en = parsed.en.replace(/["'`]/g, " ").replace(/[\\{}[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
-    return en.length >= 3 && !containsCjk(en) ? en : null;
+    if (en.length < 3 || containsCjk(en)) return null;
+    const checked = ensureProperNouns(en, properNouns(query));
+    return { en: checked.en.slice(0, 240), restored: checked.restored };
   } catch {
     return null;
   }
@@ -1379,7 +1402,9 @@ async function serverRetrieve(query: string): Promise<{
   const toYear = new Date().getFullYear();
   const fromYear = toYear - 7;
   const isZh = containsCjk(query);
-  const enQuery = await translateQuery(query);
+  const zhTranslation = await translateQuery(query);
+  const enQuery: string | null = zhTranslation ? zhTranslation.en : null;
+  const zhRestored = zhTranslation?.restored ?? [];
   // 中文检索 = 中英双语并行：OpenAlex 用「英文|中文」OR 一并召回，S2 用英文（英文索引为主），
   // Crossref 用中文原题补充中文期刊；译词与原词都写进 queryVariants/limitations。
   const queryVariants = enQuery ? [query, enQuery] : [query];
@@ -1490,7 +1515,13 @@ async function serverRetrieve(query: string): Promise<{
         }
       }
       if (enQuery) {
-        limitations.push(`中文检索词已译为英文「${enQuery}」：OpenAlex 用「英文|中文」并列检索、Semantic Scholar 用英文、Crossref 按中文原题补充；机器翻译可能有偏差。`);
+        const nouns = properNouns(query);
+        const nounNote = nouns.length === 0
+          ? ""
+          : zhRestored.length > 0
+            ? `；译词缺失的专有名词 ${zhRestored.join("、")} 已按原样补回`
+            : `；原词中的专有名词（${nouns.join("、")}）已在译词中核对保留`;
+        limitations.push(`中文检索词已译为英文「${enQuery}」：OpenAlex 用「英文|中文」并列检索、Semantic Scholar 用英文、Crossref 按中文原题补充；机器翻译可能有偏差${nounNote}。`);
       } else {
         limitations.push("自动翻译不可用（模型未配置或调用失败），本次只用中文原词检索；OpenAlex 与 Semantic Scholar 以英文索引为主，中文召回可能偏少。");
       }
