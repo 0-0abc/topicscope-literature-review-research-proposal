@@ -18,7 +18,7 @@
 
 **最快体验**：打开站点 → 点右上角「**演示模式**」→ 按 6 步动线跳转，3 分钟看完全部核心能力；对话框里附已知局限 Q&A 与可导出的录屏脚本。
 
-![演示模式：预置三方向、3 分钟评审动线、局限 Q&A 与录屏脚本](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/1vHg2eUZ23aFJ9iA.png)
+![演示模式：预置三方向、3 分钟评审动线、局限 Q&A 与录屏脚本](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/OGFI7bgvGwh7BZaA.png)
 
 ## 二、3 分钟评审体验动线
 
@@ -45,40 +45,40 @@ AI 生成把所选统计数字、论文标题与摘要节选、以及勾选的�
 
 **组一 · 检索与雷达**：输入一个研究方向，它把相关文献聚成若干簇，给出覆盖度判定，并明确告诉你每个判定「不能推出什么」。每个方向卡片带一张按年发文量迷你趋势图（近三年深色高亮）。
 
-![方向雷达：6 个方向聚类、覆盖判定、按年趋势与「不能推出什么」](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/SqRInKUTWGS49DHT.png)
+![方向雷达：6 个方向聚类、覆盖判定、按年趋势与「不能推出什么」](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/EGN9ICSewb7kxmmj.png)
 
 - 语料：内置离线快照 540 篇真实论文（OpenAlex），2018–2026 按年均匀采样；页面顶部写明检索式、时间范围、检索日期、来源接口与「离线快照」标记，导出时也带上；
 
-![检索快照溯源：检索式、时间范围、来源接口与离线快照标记](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/hB78LRGKcfKkmyYx.png)
+![检索快照溯源：检索式、时间范围、来源接口与离线快照标记](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/lJvhWwzlfpbLkthq.png)
 
 - 中文输入自动译成英文并保留原词，OpenAlex 中英并列、S2 英文、Crossref 中文补充；`C++` 等符号专名会核对补回，原词与译词都进入检索快照。
 
-![中文 C++ 专名检索：中英双语结果与来源合并](__ZH_BILINGUAL__)
+![中文 C++ 专名检索：中英双语结果与来源合并](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/Wq44tZdJ5KzI2sKa.png)
 
-![中文检索快照：原词、英文译词与专名核对留痕](__ZH_PROVENANCE__)
+![中文检索快照：原词、英文译词与专名核对留痕](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/wduOJb05wYvPMfve.png)
 
 - 分析：中文二元切分 + 英文词形归一 → TF-IDF（余弦）→ 球面 k-means（k-means++ 初始化、固定随机种子，结果可复现）；
 - 判定规则（界面原样公开，可现场核对）：**size < 10 或占比 < 5% 视为样本内稀疏 · 证据不足；占比 < 10% 且近三年占比 ≥ 60% 视为增长窗口；占比 ≥ 12% 且中位年份早于区间末尾 4 年以上、近期新增 ≤ 35% 视为高密度成熟方向；其余为稳定产出方向。** 展开卡片还能看到命中的规则分支与阈值；
 
-![判定规则原文，展开卡片可见命中的规则分支与阈值](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/kY68Br2WnnXd5Xw5.png)
+![判定规则原文，展开卡片可见命中的规则分支与阈值](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/hDgFfzIED0YxPdeN.png)
 
 - 每个判定旁的「不能推出什么」按该簇实际占比动态生成。例如 4 篇、占比 0.7% 的 `counting · processing` 被判「样本内稀疏 · 证据不足」，并明说不能据此判断方向真实密度或冷热；
 
-![稀疏簇改判「样本内稀疏 · 证据不足」，边界说明按实际占比动态生成](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/ss7sEjpr482fHXUU.png)
+![稀疏簇改判「样本内稀疏 · 证据不足」，边界说明按实际占比动态生成](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/jvBdrHdDgFacl7TH.png)
 
 - 检索边界：空检索词禁用并提示；无意义词 0 命中时明确「未检索到相关结果，换个说法试试」+「重试检索」，**不降级、不聚类、不产出噪声判定**；413/403/429/504 映射为内联报错（超长请求提示「内容过长，请精简后重试（请求上限约 96KB）」）；
 - 检索状态：每次请求带序号，只允许最新请求写入 papers/radar/report，过期响应不会覆盖新样本；本轮修复了失败后仍保留上一轮旧样本的问题，**0 命中或检索失败都会清空旧样本**并显示当前错误；
 
-![无意义检索词 0 命中：明确「未检索到」，不降级、不产出噪声判定](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/RDi04NK4jzmqHw9D.png)
+![无意义检索词 0 命中：明确「未检索到」，不降级、不产出噪声判定](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/G1Ks5UKBCcf3KKAm.png)
 
 - 拥挤度：文献占比 40% + 引用占比 30% + 顶会集中度 30%；卡片默认只显示结论与关键数字，细节点「展开详情」才展开；
 - 「导师汇报」一键生成 3 个备选方向对比（统计证据 + 判定依据 + 边界 + 代表文献 DOI），规则生成不经模型，可导出 Markdown；候选经过滤（size ≥ 10、非稀疏/空白、摘要覆盖 ≥ 50%），不会推荐噪声簇；每个备选带「体检这个方向」一键跳体检；
 
-![导师汇报：3 个备选方向对比（统计证据 + 判定依据 + 边界 + 代表文献 DOI）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/Hn59eKlEHRDmmykL.png)
+![导师汇报：3 个备选方向对比（统计证据 + 判定依据 + 边界 + 代表文献 DOI）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/pNonoIVK3uJpNbHH.png)
 
 - 关键词共现图：28 节点 / 87 边，只保留提升度 > 1.15 的词对。
 
-![关键词共现网络：28 节点 / 87 边，仅保留提升度大于 1.15 的词对](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/6feGxojKVvNwaHRd.png)
+![关键词共现网络：28 节点 / 87 边，仅保留提升度大于 1.15 的词对](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/d4aRdpqpPU9hKWxL.png)
 
 默认快照上的判定分布：**高密度成熟方向 2 · 稳定产出方向 2 · 增长窗口 1 · 样本内稀疏 · 证据不足 1**。
 
@@ -90,55 +90,55 @@ AI 生成把所选统计数字、论文标题与摘要节选、以及勾选的�
 
 **组一 · AI 研究方向建议（结构化回查）**：模型获得簇统计、共现词对、语料规模与当前论文元数据，服务端实际温度 `0.4`，提示词禁止引用数据外事实。正文中的提升度/占比/被引等数字与统计白名单比对，证据 ID 按送入清单定位；对不上的标「引用无法定位」或「正文数字未核对」，不存在的 ID 直接丢弃。这套检查针对**结构化数字与证据引用**，不等于验证模型所有自然语言事实。每条建议带「体检这个想法」一键跳体检，整份可导出 Markdown。
 
-![AI 研究方向建议：结构化数字白名单与 evidenceId 回查](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/78CE9yeHzev2i7B5.png)
+![AI 研究方向建议：结构化数字白名单与 evidenceId 回查](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/9CxPpOD4PSSbZGKq.png)
 
 **组二 · 论文与证据**：按方向/年份区间/开放获取/来源/证据等级筛选，按被引或年份排序、设最低被引门槛，分页浏览；勾选导出 Markdown/CSV，**导出头部带完整检索快照**（查询原文、中英检索式变体、来源计划、检索时间、是否命中缓存、是否降级、过滤条件、去重前后篇数、摘要覆盖率、OA 覆盖率、样本框与已知局限），文件名带篇数。
 
-![文献库：方向/年份/开放获取/来源/证据等级筛选 + 分页 + 导出](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/veD23ge7EBDmPyUa.png)
+![文献库：方向/年份/开放获取/来源/证据等级筛选 + 分页 + 导出](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/AFTrRoNoYCIwHK70.png)
 
 - 每篇标注来源接口、检索时间、去重键；证据等级按「只有元数据 / 有摘要 / 已核对全文」分级；
 - 六维候选评分（问题匹配 30 / 方法相关 20 / 证据完整 15 / 复现线索 15 / 时效趋势 10 / 约束适配 10），每维给理由，偏好可切换；「复现线索」按代码/数据/权重/划分/配置逐项登记，不把「论文提了一句」当「可复现」；
 - 论文证据卡逐字段人工核对：字段一改自动撤销「已核对」、空字段不许标记、每条核对带时间与原文位置；写不动的列成「当前材料无法判断」；附审稿人视角速查（改编自 Supervisor-Skills，CC-BY-4.0）。
 
-![论文证据卡：逐字段人工核对、六维评分拆解、审稿人视角速查](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/2nQxDy4S7afRX1lb.png)
+![论文证据卡：逐字段人工核对、六维评分拆解、审稿人视角速查](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/1q0S7pc3YZmfHoVw.png)
 
 **组三 · 研究对话**：模型只看到当前聚类统计 + 选定论文标题/摘要节选 + 勾选的已核对证据；**聚焦方向按提问关键词自动匹配**，页面列出本次实际送入的论文清单与来源，未送全文。每条回答带引用徽标，徽标按该回答实际送入并冻结的来源显示「摘要 / 标题 / 年份 / 人工核对」；只有本次送过的人工核对字段才标人工核对。判断不了的单标「无法判断」；认可的回答一键「加入方案草稿」进入方案上下文。
 
 本轮审计明确：**对话不是完整数字白名单审计**，其保障是引用元数据冻结、来源徽标和实际送入清单可核对。回答冻结时保存 paperId、标题、来源、核对字段与本次送入论文列表，之后证据标注或样本变化不会反向篡改旧回答；这些元数据随 IndexedDB 档案保存，导出的 Markdown 离线也可读，并逐条列出实际送入来源。模型若把引用 JSON 或证据 ID 误写进 `answer`，服务端与前端都会清洗，引用仍保留为独立徽标，不再直接显示机器元数据。
 
-![研究对话：本次送入清单、冻结引用徽标、无法判断标注、加入方案草稿](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/KYGnHSvQvexKvgx8.png)
+![研究对话：本次送入清单、冻结引用徽标、无法判断标注、加入方案草稿](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/454D1n8ieOEKY31U.png)
 
 **组四 · 文献综述草稿**：每方向选被引最高 4 篇（≤24 篇），只允许引用编号文献，[n]↔GB/T 7714 一一对应；按主题综合叙述而非逐篇罗列；三条写作纪律（措辞按证据强度校准 / 每段交织对比≥2 篇 / 自我对抗检查）；生成后本地质量门禁（引用 / 交织 / 分寸）逐条标「通过 / 存疑 / 不足」，未被引用的编号单列候选；代表文献经相关性过滤，跨域噪声不混入。正文结构化数字按送入统计回查，Markdown 由安全渲染器呈现。
 
-![文献综述：主题综合叙述 + 本地质量门禁（引用 / 交织 / 分寸）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/5i3JwvrfNKyFesmg.png)
+![文献综述：主题综合叙述 + 本地质量门禁（引用 / 交织 / 分寸）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/icxOpdqGMCtMbXxj.png)
 
 **组四 · 选题体检**：固定顺序「致命缺陷审计 → 生命周期与能力匹配 → 五维评分（更高/更快/更强/更省/更广，5 分起步给依据才加分）→ 范式转移探测 → 可行性风险 → 先做的三件事」；新颖性只对照样本内编号真实文献；能力画像自报、未经核验（界面写明）；只选方向不写想法可做方向级体检，默认值明确标注；三档结论 + 本地完整性自检（致命缺陷却「接受」自动降为「拒绝并转向」；「强烈接受」但无一维 ≥8 降为「修改后接受」，降级原因写在结论旁）；正文数字按统计白名单回查；导出附新颖性核对文献。框架改编自 Supervisor-Skills idea-evaluator（CC-BY-4.0，界面与导出署名）。
 
-![选题体检：三档结论、致命缺陷审计、五维评分与完整性自检](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/n9srLTygcKfDTNvi.png)
+![选题体检：三档结论、致命缺陷审计、五维评分与完整性自检](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/g6ubVayqoq9vkcpK.png)
 
 **组四 · 研究方案生成器**：约束填清楚后模型只在范围内设计，固定 15 节 + 五项评分；模型做逻辑链自洽检查，界面另给**逐环对照表**（局限→想法→挑战→方法→结果，上下游摘录并排 + 互锁/存疑徽标）；没填的约束不代猜、单列「待补充条件」；数据集/代码按公开/受控/第三方受限/论文内/未核实登记；体检结论与综述缺口作「前置分析」进上下文。
 
 每次生成**冻结**检索快照、约束、证据、论文清单与模型信息，上下文变化提示「依据已变化」，展示与导出仍使用冻结内容。人工修订可保存、随档案持久化并在重新打开后恢复；恢复时同时恢复冻结输入与修订时间，不把当前样本挂到旧方案上。方案第 14 节 `references` 与第 15 节 `evidenceIndex` 不信任模型自由编写：**服务端按当前论文与证据白名单重建**，人工修订保存时也按冻结白名单再次重建，未知论文/证据不会混入。导出标注「含人工修订」；复现包 JSON 记录冻结输入、提示词摘要、证据白名单、模型、实际 `temperature: 0.4` 与文本哈希。
 
-![研究方案：15 节 + 五项评分 + 逻辑链逐环对照表（互锁 / 存疑）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/0aFs90LjK1nbTnbK.png)
+![研究方案：15 节 + 五项评分 + 逻辑链逐环对照表（互锁 / 存疑）](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/fZjnv86qyYq8Sb2a.png)
 
-![生成时输入快照（已冻结），导出与复现包均以此为准](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/vjhXhm5LYdIYGfnx.png)
+![生成时输入快照（已冻结），导出与复现包均以此为准](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/ccrsLMn1cH5wkxfO.png)
 
-![复现包 JSON 与可持久化的人工修订入口](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/yXLSD90I2zkJBUcx.png)
+![复现包 JSON 与可持久化的人工修订入口](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/YuepLuRHMuf7ZDNx.png)
 
 **组四 · 研究档案**：IndexedDB 本地存档；**完整恢复**方案（含人工修订与冻结输入）/论文/证据标注/对话（含冻结引用元数据）/体检/综述/草稿；载入可选「替换标注」或「合并载入」（冲突保当前）。静态资源与懒加载模块全量预缓存，断网可重开并切换页签；AI 功能离线时显示不可用原因与仍可用的本地功能。**Service Worker 版本由构建内容 hash 生成**，外壳、懒加载 chunk、字体或快照任一变化都会触发升级，避免构建已更新但旧 SW 继续拦截请求。
 
-![研究档案：完整恢复方案/对话/体检/综述，替换或合并载入](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/uixIrewVxLPP4owY.png)
+![研究档案：完整恢复方案/对话/体检/综述，替换或合并载入](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/sdarYzVwbhrYyzLI.png)
 
 **组五 · 指标口径对齐**：四类任务（分类/分割/排序检索/回归）26 个指标，每个带公式、口径与误读提示；输入有校验（负数/小数报错而非静默算数）；口径换算台能换的给公式，**换不了的明确说换不了并给数学原因**（mIoU↔mDice、Accuracy↔Balanced Accuracy、Macro-F1↔Micro-F1、Macro-F1↔Accuracy、MAPE↔SMAPE 五组单列成表）；结果可导出 MD/CSV 或一键带入研究方案；56 项自检的期望值来自独立 Python 参考实现。
 
 本轮指标审计修复两条真实计算路径：二分类 TP/FP/FN/TN 转混淆矩阵固定为行=真实类别、列=预测类别，即 **`[[TN, FP], [FN, TP]]`**；分割任一面积或交集变化后，union 按 **`predArea + gtArea - intersection`** 重算，不再沿用陈旧值。
 
-![指标口径对齐：26 个指标、公式、口径说明与误读提示](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/huyc3C7VQVDVxkwY.png)
+![指标口径对齐：26 个指标、公式、口径说明与误读提示](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/q9krkNrWFqucymEO.png)
 
-![「换不了的口径，明确说换不了」：5 组口径与原因](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/4wNMR1lYSnOFtkUA.png)
+![「换不了的口径，明确说换不了」：5 组口径与原因](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/H9QDee7cAJRWa8B1.png)
 
-![指标自检面板：独立 Python 参考期望值与实际值对照](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/17HhMVsd1BlWzFxS.png)
+![指标自检面板：独立 Python 参考期望值与实际值对照](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/QSHzks1bAzPDzMPd.png)
 
 最典型的例子是 mIoU → mDice：IoU→Dice 是逐类非线性变换，先平均再变换与先变换再平均结果不同，只有一个 mIoU 无法唯一确定 mDice，必须拿到逐类 IoU。工具把这个「换不了」和原因直接写在界面上——我认为这比一个看起来能用、其实会误导人的换算更有价值。
 
@@ -183,29 +183,29 @@ AI 生成把所选统计数字、论文标题与摘要节选、以及勾选的�
 
 **第 2 步 · 指标模块先做 + 独立自检**：我要求每个指标有公式与口径、能换的换、换不了的写明原因。这里抓到真 bug：多分类 MCC 算出 57.9（远超 [-1,1]）。我让 Qoder 核对 scikit-learn 主分支源码，换成 Gorodkin 形式（二分类退化为标准 MCC）；随后我用 Python 独立写参考实现固化 56 项用例，只共享数学定义不共享代码路径。本轮又补上混淆矩阵方向与分割 union 重算的回归路径。
 
-![对话摘录②：多分类 MCC 越界 → 核对 scikit-learn 源码 → Gorodkin + 独立参考实现](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/fmbLhUPkQF39SOaM.png)
+![对话摘录②：多分类 MCC 越界 → 核对 scikit-learn 源码 → Gorodkin + 独立参考实现](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/9aGIEtma7r1S3zN3.png)
 
 **第 3 步 · 先实测数据源再定架构**：arXiv 无 CORS 头、Semantic Scholar 429、DBLP 反爬；OpenAlex 与 Crossref 返回 `Access-Control-Allow-Origin: *`。据此定为「浏览器本地分析 + 同源 Edge Function 代理检索/模型」，而非依赖浏览器直连第三方接口；后续把检索额度与密钥收口到服务端，并加入 S2 双主源。
 
-![对话摘录①：参赛目标 → 数据源 CORS 实测 → 设计稿驱动](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/LLWAVtf2N6DXWKnc.png)
+![对话摘录①：参赛目标 → 数据源 CORS 实测 → 设计稿驱动](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/tbg75zYVUM3ZeNYE.png)
 
 **第 4 步 · 快照按年分桶 + key 不打包**：第一版按被引抓被 2026 年新论文淹没（260/460 同一年），我改按年分桶每年固定配额重抓得 540 篇。key 硬约束不打包进站点；模型 key 从源码移除改读服务端 Secret，检索 key 由我亲手填进站点设置。
 
 **第 5 步 · 分析层两轮推翻 + 判定口径从「给结论」改「给边界」**：过度分词（semi-supervised→semi-supervis）改只做复数归一+停用表；共现图退化成 image—medical 改加文档频率上限+lift>1.15。判定标签从三档改五档、每卡强制「不能推出什么」、规则原文公开；同批要求卡片渐进展开与学术期刊风格 UI。这是我对成品影响最大的一次返工。
 
-![对话摘录③：先给关键信息、从「给结论」改成「给边界」](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/uTFqgcGB6dIKqRQc.png)
+![对话摘录③：先给关键信息、从「给结论」改成「给边界」](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/Pd9N3gYD9ojgLxu1.png)
 
 **第 6 步 · 迁移开源科研方法论 + 调研实测**：我选定 HKUSTDial/Supervisor-Skills（CC-BY-4.0），Qoder 通读后把 idea-evaluator 做成体检、deep-research 纪律做进综述、tech-paper-template 逻辑链做进方案、审稿人视角做成证据卡速查，全部保留署名；新颖性一律落到样本内编号真实文献。此前还做了市场调研与线上端到端实测，确认「证据可核验」是空位并避开同赛道重合点。
 
-![对话摘录④：冲奖调研 + 线上实测 + Supervisor-Skills 方法论迁移](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/vGu2IRYhzc6WFFGR.png)
+![对话摘录④：冲奖调研 + 线上实测 + Supervisor-Skills 方法论迁移](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/EmocOrH6MiaA6DTL.png)
 
 **第 7 步 · 把「产出→下游」断点接通 + 检索迁服务端**：我给评审清单「先做扎实主线、别加页签」，Qoder 落地档案完整恢复、证据状态机、AI 六态状态机、快照冻结、研究对话、导航收敛五组；我追问 OpenAlex 额度后迁服务端多源合并+12h 共享缓存；「全部直接推进」补筛选分页/对齐导出/人工修订/重试与中文提示，回归 141→246，主包 500+kB→364kB。
 
-![对话摘录⑤：评审清单 → 全链路闭环 → 服务端多源检索](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/yxY36q4NeYGm6Znf.png)
+![对话摘录⑤：评审清单 → 全链路闭环 → 服务端多源检索](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/qxy3Xfmw9MjMHxIZ.png)
 
 **第 8 步 · 按实测报告严谨性返工 + 本轮审计修复**：我附《冲奖实测评估与优化建议报告》，Qoder 落地 M1–M7 与 S1–S6（稀疏降级/0 命中/数字回查/异常内联/相关性门禁/禁代猜/导出元数据/输入校验/离线缓存/输入快照/引用门禁），并自查出 0 命中回退漏洞。我追问「都修复完了吗」，它如实答「不是 100%」列出未做项；我说「完善好」，补演示模式、诚实验证章节、逻辑链对照表。2026-11-24 本轮再按代码与离线回归逐项审计，修正回查边界、温度、中文翻译隐私、双主源/兜底/缓存、Markdown 安全、检索竞态、对话冻结、方案修订与白名单、指标矩阵/union、SW 内容 hash，回归收口到 **474 条全通过**。
 
-![对话摘录⑥：按实测报告修复 + 如实说明未做项 + 后续审计回归](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-13/yCFRuJJtur3tlcGQ.png)
+![对话摘录⑥：按实测报告修复 + 如实说明未做项 + 后续审计回归](https://static.tianchi.aliyun.com/userimg/1095281234536/2026-11-24/vBLFdZsLj0bVr0g0.png)
 
 **分工总结**
 
