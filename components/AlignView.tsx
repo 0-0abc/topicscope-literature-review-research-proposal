@@ -27,10 +27,15 @@ import {
   type MetricResult,
 } from "@/lib/metrics/registry";
 import {
+  binaryCountsToMatrix,
   f1FromPrecisionRecall,
   validateConfusionMatrix,
 } from "@/lib/metrics/classification";
-import { diceFromIou, iouFromDice } from "@/lib/metrics/segmentation";
+import {
+  diceFromIou,
+  iouFromDice,
+  withSegmentationUnion,
+} from "@/lib/metrics/segmentation";
 import type { ConfusionMatrix, SegmentationClass } from "@/lib/metrics/types";
 import { metricValue, percent } from "@/lib/format";
 import { downloadText } from "@/lib/export";
@@ -99,7 +104,10 @@ export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
       const length = Math.min(yTrue.length, yPred.length);
       return { kind: "regression", yTrue: yTrue.slice(0, length), yPred: yPred.slice(0, length) };
     }
-    return { kind: "classification", matrix: binaryMode ? toMatrix(binary) : matrix };
+    return {
+      kind: "classification",
+      matrix: binaryMode ? binaryCountsToMatrix(binary) : matrix,
+    };
   }, [task, segments, rankingText, rankingK, trueText, predText, matrix, binaryMode, binary]);
 
   // S1：分类输入先校验再计算。非法时不产出任何指标，避免负数/小数/N=0
@@ -296,16 +304,6 @@ export function AlignView({ onApplyToPlan }: AlignViewProps = {}) {
   );
 }
 
-function toMatrix(counts: { tp: number; fp: number; fn: number; tn: number }): ConfusionMatrix {
-  return {
-    labels: ["负类", "正类"],
-    m: [
-      [counts.tp, counts.fn],
-      [counts.fp, counts.tn],
-    ],
-  };
-}
-
 /**
  * 计数输入解析：保留用户键入的负数与小数，交给 validateConfusionMatrix 判定。
  * 这里不做 Math.max(0, …) 之类的静默截断——那会把非法输入伪装成合法计数。
@@ -472,8 +470,10 @@ function SegmentationInput({
                       value={item[key]}
                       aria-label={key}
                       onChange={(event) => {
+                        const nextValue = Math.max(0, Number(event.target.value) || 0);
+                        const nextItem = withSegmentationUnion({ ...item, [key]: nextValue });
                         const next = [...value];
-                        next[index] = { ...item, [key]: Math.max(0, Number(event.target.value) || 0) };
+                        next[index] = nextItem;
                         onChange(next);
                       }}
                       className="h-8 w-24 tabular-nums"

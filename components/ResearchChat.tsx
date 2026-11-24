@@ -14,6 +14,7 @@ import type { ChatMessage } from "@/hooks/useSessionStore";
 import { useFunctionProbe } from "@/hooks/useFunctionProbe";
 import { AiServiceNotice } from "@/components/AiServiceNotice";
 import { Markdown } from "@/components/Markdown";
+import { cleanChatAnswer } from "@/functions/chat";
 
 const ERROR_MESSAGES: Record<string, string> = {
   service_not_configured: "研究对话暂时不可用：服务端还没有配置模型接口的 key。",
@@ -32,13 +33,34 @@ interface ChatRef {
   field?: string;
 }
 
-/** 每次发送时实际送入模型的论文清单（标题+字段来源），按助手消息下标记录。 */
+/** 引用元数据随 assistant 消息持久化；旧存档没有这些字段时保持“信息缺失”。 */
+interface FrozenChatRef extends ChatRef {
+  paperId?: string;
+  title?: string;
+  source?: string;
+  verifiedFields?: string[];
+}
+
+/** 每次发送时实际送入模型的论文清单（标题+字段来源），冻结在助手消息内。 */
+interface SentInputPaper {
+  paperId: string;
+  title: string;
+  source: string;
+  verifiedFields: string[];
+}
+
 interface SentInput {
   clusterName: string | null;
-  papers: { title: string; source: string }[];
-  /** 本次实际送入的人工核对字段（按论文编号），用于徽标区分「人工核对」与「摘要/标题」。 */
-  verified: { n: number; labels: string[] }[];
+  papers: SentInputPaper[];
 }
+
+/** ChatMessage 由上层存档；附加字段随原有消息一起写入 IndexedDB，无需改动 hooks。 */
+interface StoredChatMessage extends ChatMessage {
+  sentInput?: SentInput;
+}
+
+const sentInputOf = (message: ChatMessage): SentInput | undefined =>
+  (message as StoredChatMessage).sentInput;
 
 /**
  * S2：focus 为全样本时，按提问关键词自动匹配最相关的簇。
@@ -85,7 +107,6 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sentInputs, setSentInputs] = useState<Record<number, SentInput>>({});
 
   const autoCluster = useMemo(
     () =>
@@ -125,25 +146,37 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
     return out;
   }, [evidenceNotes, includeVerified, byId]);
 
-  if (available !== "ready") {
+  const serviceUnavailable = available !== "ready";
+  if (serviceUnavailable && messages.length === 0) {
     return <AiServiceNotice status={available} feature="研究对话" />;
   }
 
   const send = async () => {
     const question = input.trim();
-    if (!question || !context || busy) return;
+    if (!question || !context || busy || serviceUnavailable) return;
     const history: ChatMessage[] = [...messages, { role: "user", content: question }];
     onMessagesChange(history);
     setInput("");
     setBusy(true);
     setError(null);
-    // 冻结本次实际送入的论文与来源，回答的 refs 按这份清单回查，不受后续切换影响
+    // 冻结本次实际送入的论文与来源；随助手消息存档，不依赖组件状态或当前论文列表。
     const sentPapers = focusPapers;
     const sentClusterName =
       focus === "all"
         ? autoCluster?.name ?? null
         : radar?.clusters.find((c) => String(c.id) === focus)?.name ?? null;
-    const verifiedIds = new Set(verified.map((item) => item.paperId));
+    const sentInput: SentInput = {
+      clusterName: sentClusterName,
+      papers: sentPapers.map((p) => {
+        const checked = verified.find((item) => item.paperId === p.id);
+        return {
+          paperId: p.id,
+          title: p.title,
+          source: checked ? "摘要+人工核对" : "摘要",
+          verifiedFields: checked?.fields.map((field) => field.label) ?? [],
+        };
+      }),
+    };
     try {
       const raw = await requestJson(
         "/functions/v1/app/chat",
@@ -155,6 +188,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
             messages: history.map((m) => ({ role: m.role, content: m.content })),
             papers: sentPapers.map((p, i) => ({
               n: i + 1,
+              paperId: p.id,
               title: p.title,
               year: p.year,
               abstract: p.abstract ?? "",
@@ -165,30 +199,32 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
         ERROR_MESSAGES,
       );
       const body = raw as { answer?: string; refs?: ChatRef[]; evidenceIds?: string[]; uncertain?: string };
-      setSentInputs((prev) => ({
-        ...prev,
-        [history.length]: {
-          clusterName: sentClusterName,
-          papers: sentPapers.map((p) => ({
-            title: p.title,
-            source: verifiedIds.has(p.id) ? "摘要+人工核对" : "摘要",
-          })),
-          verified: sentPapers
-            .map((p, i) => ({ n: i + 1, item: verified.find((v) => v.paperId === p.id) }))
-            .filter((x): x is { n: number; item: NonNullable<typeof x.item> } => !!x.item)
-            .map((x) => ({ n: x.n, labels: x.item.fields.map((f) => f.label) })),
-        },
-      }));
-      onMessagesChange([
-        ...history,
-        {
-          role: "assistant",
-          content: body.answer ?? "",
-          refs: body.refs ?? [],
-          evidenceIds: body.evidenceIds ?? [],
-          uncertain: body.uncertain ?? "",
-        },
-      ]);
+      const cleaned = cleanChatAnswer(body.answer ?? "");
+      const refs = [...new Map([...(body.refs ?? []), ...cleaned.refs].map((ref) => [`${ref.n}:${ref.field ?? ""}`, ref])).values()];
+      const frozenRefs: FrozenChatRef[] = refs.map((ref) => {
+        const paper = Number.isInteger(ref.n) && ref.n > 0 ? sentInput.papers[ref.n - 1] : undefined;
+        return {
+          n: ref.n,
+          ...(ref.field ? { field: ref.field } : {}),
+          ...(paper
+            ? {
+                paperId: paper.paperId,
+                title: paper.title,
+                source: paper.source,
+                verifiedFields: paper.verifiedFields,
+              }
+            : {}),
+        };
+      });
+      const assistantMessage: StoredChatMessage = {
+        role: "assistant",
+        content: cleaned.text,
+        refs: frozenRefs,
+        evidenceIds: [...new Set([...(body.evidenceIds ?? []), ...cleaned.evidenceIds])],
+        uncertain: body.uncertain ?? "",
+        sentInput,
+      };
+      onMessagesChange([...history, assistantMessage]);
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "对话失败，请稍后再试。");
     } finally {
@@ -196,18 +232,23 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
     }
   };
 
-  /** refs 回查标题：优先用发送时冻结的清单，档案回填的旧消息退回当前选择。 */
-  const titleOfRef = (messageIndex: number, n: number): string | null =>
-    sentInputs[messageIndex]?.papers[n - 1]?.title ?? focusPapers[n - 1]?.title ?? null;
+  /** 标题只取引用自身冻结的元数据；旧存档或未知编号绝不回填当前论文。 */
+  const titleOfRef = (ref: FrozenChatRef): string | null => ref.title?.trim() || null;
 
-  /** 徽标来源按真实送入内容判定：只有本次送过的人工核对字段才标「人工核对」。 */
-  const refSourceOf = (messageIndex: number, r: ChatRef): string => {
-    const labels = sentInputs[messageIndex]?.verified?.find((v) => v.n === r.n)?.labels;
-    if (r.field && labels?.includes(r.field)) return `${r.field}（人工核对）`;
-    if (r.field === "abstract") return "摘要";
-    if (r.field === "title") return "标题";
-    if (r.field === "year") return "年份";
-    return r.field ?? "摘要";
+  /** 徽标来源按回答冻结的核对字段判定，不按当前 evidenceNotes 重新推断。 */
+  const refSourceOf = (ref: FrozenChatRef): string => {
+    const field = ref.field?.trim();
+    const source =
+      field === "abstract"
+        ? "摘要"
+        : field === "title"
+          ? "标题"
+          : field === "year"
+            ? "年份"
+            : field ?? "摘要";
+    if (!ref.paperId || !ref.title) return `${source}（论文信息缺失）`;
+    if (field && ref.verifiedFields?.includes(field)) return `${field}（人工核对）`;
+    return source;
   };
 
   const exportChat = () => {
@@ -215,16 +256,16 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
     lines.push(`- 检索式: ${report?.job.rawQuestion ?? "（离线样本）"}`);
     lines.push(`- 导出时间: ${new Date().toISOString().slice(0, 16).replace("T", " ")}`);
     lines.push(`- 消息数: ${messages.length}`, "");
-    for (const [i, m] of messages.entries()) {
-      lines.push(m.role === "user" ? `## 问` : `## 答`, "", m.content, "");
+    for (const m of messages) {
+      lines.push(m.role === "user" ? `## 问` : `## 答`, "", cleanChatAnswer(m.content).text, "");
       if (m.role === "assistant") {
         if (m.refs?.length) {
           lines.push(
             "引用: " +
               m.refs
                 .map((r) => {
-                  const title = titleOfRef(i, r.n);
-                  return `[${r.n}] ${title ?? `论文${r.n}`} · ${refSourceOf(i, r)}`;
+                  const title = titleOfRef(r);
+                  return `[${r.n}] ${title ?? `论文${r.n}（引用信息缺失）`} · ${refSourceOf(r)}`;
                 })
                 .join("；"),
             "",
@@ -232,7 +273,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
         } else {
           lines.push("本次回答未引用具体论文字段。", "");
         }
-        const sent = sentInputs[i];
+        const sent = sentInputOf(m);
         if (sent) {
           lines.push(
             `本次实际送入（${sent.papers.length} 篇${sent.clusterName ? ` · 方向：${sent.clusterName}` : ""}）:`,
@@ -303,7 +344,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
           </p>
         ) : (
           messages.map((m, i) => {
-            const sent = sentInputs[i];
+            const sent = sentInputOf(m);
             return (
               <div key={i} className={m.role === "user" ? "text-right" : ""}>
                 <div
@@ -314,7 +355,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
                   }
                 >
                   {m.role === "assistant" ? (
-                    <Markdown text={m.content} className="leading-relaxed" />
+                    <Markdown text={cleanChatAnswer(m.content).text} className="leading-relaxed" />
                   ) : (
                     <p className="whitespace-pre-wrap leading-relaxed">{m.content}</p>
                   )}
@@ -322,10 +363,10 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
                     <div className="space-y-1.5">
                       <div className="flex flex-wrap gap-1.5">
                         {(m.refs ?? []).map((r, j) => {
-                          const title = titleOfRef(i, r.n);
+                          const title = titleOfRef(r);
                           return (
                             <Badge key={j} variant="outline" className="rounded-sm text-[10px]">
-                              [{r.n}] {title ? title.slice(0, 24) : `论文${r.n}`} · {refSourceOf(i, r)}
+                              [{r.n}] {title ? title.slice(0, 24) : `论文${r.n}（引用信息缺失）`} · {refSourceOf(r)}
                             </Badge>
                           );
                         })}
@@ -385,7 +426,7 @@ export function ResearchChat({ context, radar, papers, byId, evidenceNotes, repo
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send();
           }}
         />
-        <Button size="sm" onClick={() => void send()} disabled={busy || !input.trim() || !context}>
+        <Button size="sm" onClick={() => void send()} disabled={busy || serviceUnavailable || !input.trim() || !context}>
           {busy ? "思考中…" : "发送"}
         </Button>
       </div>

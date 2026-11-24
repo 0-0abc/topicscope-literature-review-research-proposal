@@ -1,6 +1,8 @@
 // 站点自带的唯一后端：把浏览器端的统计结果转成研究方向建议与研究方案。
 // 模型 API key 只从服务端环境变量读取，绝不出现在响应里。
 
+import { cleanChatAnswer } from "./chat.ts";
+
 const DEFAULT_BASE_URL = "https://maas.qianwenaiapi.com/compatible-mode/v1";
 const DEFAULT_MODEL = "qwen3.8-flash";
 const MAX_BODY_BYTES = 96 * 1024;
@@ -45,7 +47,7 @@ const CHAT_SYSTEM_PROMPT = `你是 TopicScope 的研究对话助手，围绕用�
 2. 每条事实性陈述都要给 refs：[{n: 论文编号, field?: 核对字段label}]；统计类陈述给 evidenceIds（只能从 context.evidence 挑现成 ID）。没有依据就明说"当前材料无法判断"。
 3. 区分证据等级：verifiedEvidence 是人工核对（可信度最高），papers 摘要次之，仅标题再次之；回答里注明你用的是哪一层。
 4. 措辞按证据强度校准：单篇用"提示/说明"，多篇一致才用"表明"，仅机制用"可能"；不写无依据最高级、不把相关当因果。
-5. 回答简洁（≤400 字），面向"下一步怎么做"。
+5. 回答简洁（≤400 字），面向"下一步怎么做"；answer 内可用 **加粗** 和列表，但禁止写 refs、evidenceIds、证据 ID、JSON 或引用清单，这些只放对应字段。
 输出格式：只输出一个 JSON 对象 {"answer":"...","refs":[{"n":1,"field":"方法流程"}],"evidenceIds":["cluster:xxx:size"],"uncertain":"当前材料无法判断的部分（没有则空字符串）"}`;
 
 const PLAN_SYSTEM_PROMPT = `你是一名科研方案设计助手，为正在读文献、写开题报告的学生和科研新人设计可执行的研究方案。
@@ -160,6 +162,7 @@ interface PlanConstraints {
   timeline?: string;
   openCode?: string;
   target?: string;
+  metricCaliber?: string;
 }
 
 interface ResourceRoute {
@@ -321,6 +324,7 @@ function parseConstraints(value: unknown): PlanConstraints {
     timeline: readText(value.timeline, 200) || undefined,
     openCode: readText(value.openCode, 120) || undefined,
     target: readText(value.target, 200) || undefined,
+    metricCaliber: readText(value.metricCaliber, 400) || undefined,
   };
 }
 
@@ -409,18 +413,24 @@ function filterEvidenceIds(value: unknown): string[] {
 }
 
 /** 用户已核对、随请求提交的证据字段（人工核对内容，优先级高于模型推测）。 */
-function readVerifiedEvidence(value: unknown): {
+function readVerifiedEvidence(
+  value: unknown,
+  allowedIds?: Set<string>,
+  allowedTitles?: Set<string>,
+): {
   paperId: string;
   paperTitle: string;
   fields: { label: string; value: string; location?: string }[];
 }[] {
   if (!Array.isArray(value)) return [];
   const out: { paperId: string; paperTitle: string; fields: { label: string; value: string; location?: string }[] }[] = [];
-  for (const item of value.slice(0, 12)) {
+  for (const item of value) {
     if (!isRecord(item)) continue;
     const paperId = readText(item.paperId, 120);
     const paperTitle = readText(item.paperTitle, 200);
     if (!paperId || !Array.isArray(item.fields)) continue;
+    if (allowedIds && !allowedIds.has(paperId)) continue;
+    if (allowedTitles && !allowedTitles.has(normalizeTitle(paperTitle))) continue;
     const fields: { label: string; value: string; location?: string }[] = [];
     for (const f of item.fields.slice(0, 10)) {
       if (!isRecord(f)) continue;
@@ -448,9 +458,9 @@ function readChatMessages(value: unknown): { role: "user" | "assistant"; content
   return out;
 }
 
-function readChatPapers(value: unknown): { n: number; title: string; year: number; abstract: string }[] {
+function readChatPapers(value: unknown): { n: number; paperId: string; title: string; year: number; abstract: string }[] {
   if (!Array.isArray(value)) return [];
-  const out: { n: number; title: string; year: number; abstract: string }[] = [];
+  const out: { n: number; paperId: string; title: string; year: number; abstract: string }[] = [];
   for (const item of value.slice(0, 12)) {
     if (!isRecord(item)) continue;
     const n = Number(item.n);
@@ -458,6 +468,7 @@ function readChatPapers(value: unknown): { n: number; title: string; year: numbe
     if (!Number.isFinite(n) || !title) continue;
     out.push({
       n,
+      paperId: readText(item.paperId, 120),
       title,
       year: Number(item.year) || 0,
       abstract: readText(item.abstract, 500),
@@ -473,8 +484,8 @@ function parseChat(value: unknown): {
   uncertain: string;
 } | null {
   if (!isRecord(value)) return null;
-  const answer = readText(value.answer, 1600);
-  if (!answer) return null;
+  const cleaned = cleanChatAnswer(readText(value.answer, 1600));
+  if (!cleaned.text) return null;
   const refs: { n: number; field?: string }[] = [];
   if (Array.isArray(value.refs)) {
     for (const r of value.refs.slice(0, 8)) {
@@ -486,9 +497,9 @@ function parseChat(value: unknown): {
     }
   }
   return {
-    answer,
-    refs,
-    evidenceIds: filterEvidenceIds(value.evidenceIds),
+    answer: cleaned.text,
+    refs: [...new Map([...refs, ...cleaned.refs].map((ref) => [`${ref.n}:${ref.field ?? ""}`, ref])).values()].slice(0, 8),
+    evidenceIds: [...new Set([...filterEvidenceIds(value.evidenceIds), ...cleaned.evidenceIds])],
     uncertain: readText(value.uncertain, 400),
   };
 }
@@ -532,7 +543,7 @@ function parseSuggestions(value: unknown, allowed: Set<string>) {
   return suggestions;
 }
 
-function parsePlan(value: unknown, allowed: Set<string>) {
+function parsePlan(value: unknown, context: DirectionContext) {
   if (!isRecord(value)) return null;
   const sections = isRecord(value.sections) ? value.sections : null;
   if (!sections) return null;
@@ -563,13 +574,22 @@ function parsePlan(value: unknown, allowed: Set<string>) {
   const missing = Array.isArray(value.missing)
     ? value.missing.map((item) => readText(item, 200)).filter(Boolean).slice(0, 8)
     : [];
+  const references = [...new Map(context.clusters.flatMap((cluster) => cluster.papers)
+    .map((paper) => [normalizeTitle(paper.title), paper])).values()].slice(0, 40)
+    .map((paper) => `${paper.title}（${paper.year}；被引 ${paper.citedByCount}${paper.venue ? `；${paper.venue}` : ""}）`);
+  const selectedIds = filterEvidenceIds(value.evidenceIds);
+  const evidenceIndex = selectedIds.map((id) => context.evidence.find((item) => item.id === id))
+    .filter((item): item is EvidenceItem => Boolean(item))
+    .map((item) => `${item.id}：${item.label} = ${item.value}`);
+  parsedSections.references = references.length > 0 ? references.map((ref, i) => `${i + 1}. ${ref}`).join("\n") : "当前材料没有可列出的论文。";
+  parsedSections.evidenceIndex = evidenceIndex.length > 0 ? evidenceIndex.join("\n") : "当前材料没有可列出的统计证据。";
   return {
     title: readText(value.title, 160) || "研究方案",
     sections: parsedSections,
     chainAudit: readText(value.chainAudit, 1200),
     scores,
     missing,
-    evidenceIds: filterEvidenceIds(value.evidenceIds),
+    evidenceIds: selectedIds,
   };
 }
 
@@ -826,8 +846,9 @@ async function callModel(
         body: requestBody,
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
-    } catch {
-      timedOut = true;
+    } catch (error) {
+      timedOut = error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError");
+      if (!timedOut) return { error: "upstream_error", status: 502 };
       break;
     }
 
@@ -856,6 +877,7 @@ async function callModel(
       authFailed = true;
       continue;
     }
+    if (upstream.status === 413) return { error: "upstream_truncated", status: 502 };
     if (upstream.status === 429) {
       rateLimited = true;
       break;
@@ -950,10 +972,17 @@ interface ServerReport {
 
 const SEARCH_CONTACT = "131755982+0-0abc@users.noreply.github.com";
 const SEARCH_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const SEARCH_RETRY_CACHE_TTL_MS = 2 * 60 * 1000;
 const SEARCH_CACHE_MAX = 60;
 const SEARCH_RATE_MAX = 30;
 const SEARCH_RATE_WINDOW_MS = 10 * 60 * 1000;
-const searchCache = new Map<string, { ts: number; papers: ServerPaper[]; report: ServerReport }>();
+const searchCache = new Map<string, {
+  ts: number;
+  ttlMs: number;
+  papers: ServerPaper[];
+  report: ServerReport;
+  source: string;
+}>();
 const searchBuckets = new Map<string, { count: number; resetAt: number }>();
 const SEARCH_SAMPLE_FRAME =
   "在线检索分别取「高被引」与「最新发表」两批结果，属于偏向性抽样；界面里的占比不等于真实领域产出比例。";
@@ -1251,8 +1280,8 @@ function mapCrossref(item: CrossrefItem, query: string, filter: string, retrieve
   if (!title) return null;
   const doi = normalizeDoi(item.DOI ?? null);
   const pdfLink = (item.link ?? []).find((l) => (l["content-type"] ?? "").includes("application/pdf"))?.URL ?? null;
-  const publisherUrl = item.URL ?? (doi ? `https://doi.org/${doi}` : null);
-  const oaUrl = pdfLink;
+  const publisherUrl = item.URL ?? pdfLink ?? (doi ? `https://doi.org/${doi}` : null);
+  const oaUrl = null;
   const abstract = jatsText(item.abstract);
   return {
     id: doi ? `https://doi.org/${doi}` : `https://api.crossref.org/works/${encodeURIComponent(item.DOI ?? title)}`,
@@ -1269,7 +1298,7 @@ function mapCrossref(item: CrossrefItem, query: string, filter: string, retrieve
     authorCount: (item.author ?? []).length,
     oaUrl,
     publisherUrl,
-    oaStatus: oaUrl ? "verified" : publisherUrl ? "publisher_only" : "none",
+    oaStatus: publisherUrl ? "publisher_only" : "none",
     provenance: {
       source: "crossref",
       sourceId: item.DOI ?? title,
@@ -1283,15 +1312,27 @@ function mapCrossref(item: CrossrefItem, query: string, filter: string, retrieve
   };
 }
 
-async function fetchCrossrefServer(query: string, retrievedAt: string, filter: string): Promise<ServerPaper[]> {
+async function fetchCrossrefServer(
+  query: string,
+  retrievedAt: string,
+  filter: string,
+  fromYear = 1900,
+  toYear = new Date().getFullYear(),
+): Promise<ServerPaper[]> {
   const url = new URL("https://api.crossref.org/works");
   url.searchParams.set("query.bibliographic", query);
   url.searchParams.set("rows", "100");
+  url.searchParams.set("filter", `from-pub-date:${fromYear}-01-01,until-pub-date:${toYear}-12-31`);
+  url.searchParams.set("select", "DOI,title,issued,is-referenced-by-count,container-title,abstract,link,URL,author,type");
   url.searchParams.set("mailto", SEARCH_CONTACT);
   const response = await fetchJsonWithTimeout(url, 20000);
   if (!response.ok) throw new Error(`Crossref ${response.status}`);
   const body = (await response.json()) as { message?: { items?: CrossrefItem[] } };
   return (body.message?.items ?? [])
+    .filter((item) => {
+      const year = item.issued?.["date-parts"]?.[0]?.[0];
+      return typeof year !== "number" || (year >= fromYear && year <= toYear);
+    })
     .map((item) => mapCrossref(item, query, filter, retrievedAt))
     .filter((p): p is ServerPaper => p !== null);
 }
@@ -1364,15 +1405,17 @@ function escapeRegExp(text: string): string {
 function ensureProperNouns(en: string, nouns: string[]): { en: string; restored: string[] } {
   const restored: string[] = [];
   for (const noun of nouns) {
-    const pattern = new RegExp(`\\b${escapeRegExp(noun)}\\b`, "i");
+    const left = /^[A-Za-z0-9]/.test(noun) ? "[^A-Za-z0-9]" : "";
+    const right = /[A-Za-z0-9]$/.test(noun) ? "[^A-Za-z0-9]" : "";
+    const pattern = new RegExp(`(?:^|${left})${escapeRegExp(noun)}(?=$|${right})`, "i");
     if (!pattern.test(en)) restored.push(noun);
   }
   return { en: restored.length > 0 ? `${en} ${restored.join(" ")}` : en, restored };
 }
 
 /** 中文检索词 → 英文检索短语；模型不可用或输出不合规时返回 null，调用方退回原词。 */
-async function translateQuery(query: string): Promise<{ en: string; restored: string[] } | null> {
-  if (!containsCjk(query)) return null;
+async function translateQuery(query: string, budgetAllowed: boolean): Promise<{ en: string; restored: string[] } | null> {
+  if (!containsCjk(query) || !budgetAllowed) return null;
   const apiKey = Deno.env.get("QWEN_API_KEY");
   if (!apiKey) return null;
   try {
@@ -1391,7 +1434,7 @@ async function translateQuery(query: string): Promise<{ en: string; restored: st
   }
 }
 
-async function serverRetrieve(query: string): Promise<{
+async function serverRetrieve(query: string, translationBudgetAllowed: boolean): Promise<{
   papers: ServerPaper[];
   report: ServerReport;
   source: string;
@@ -1402,7 +1445,7 @@ async function serverRetrieve(query: string): Promise<{
   const toYear = new Date().getFullYear();
   const fromYear = toYear - 7;
   const isZh = containsCjk(query);
-  const zhTranslation = await translateQuery(query);
+  const zhTranslation = await translateQuery(query, translationBudgetAllowed);
   const enQuery: string | null = zhTranslation ? zhTranslation.en : null;
   const zhRestored = zhTranslation?.restored ?? [];
   // 中文检索 = 中英双语并行：OpenAlex 用「英文|中文」OR 一并召回，S2 用英文（英文索引为主），
@@ -1420,7 +1463,7 @@ async function serverRetrieve(query: string): Promise<{
 
   let zhCrError: string | null = null;
   const zhCrPromise: Promise<ServerPaper[]> = isZh
-    ? fetchCrossrefServer(query, retrievedAt, crZhFilter).catch((error) => {
+    ? fetchCrossrefServer(query, retrievedAt, crZhFilter, fromYear, toYear).catch((error) => {
         zhCrError = error instanceof Error ? error.message : "未知错误";
         return [] as ServerPaper[];
       })
@@ -1429,10 +1472,11 @@ async function serverRetrieve(query: string): Promise<{
   try {
     // 三个上游同时发起，谁都不等谁；S2 的 1 次/秒速率由 s2Serialize 内部排队保证
     const s2Promise = fetchS2(enQuery ?? query, fromYear, toYear, retrievedAt, s2Filter);
-    const [classic, recent, zhCrPapers] = await Promise.all([
+    const [classic, recent, zhCrPapers, s2] = await Promise.all([
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "cited_by_count:desc"),
       fetchOpenAlexServer(query, oaKey, oaFilter, 100, "publication_date:desc"),
       zhCrPromise,
+      s2Promise,
     ]);
     const seen = new Map<string, OpenAlexWork>();
     for (const work of [...classic, ...recent]) {
@@ -1441,29 +1485,9 @@ async function serverRetrieve(query: string): Promise<{
     const oaPapers = [...seen.values()]
       .map((work) => mapOpenAlex(work, query, oaFilter, retrievedAt))
       .filter((p): p is ServerPaper => p !== null);
-    if (oaPapers.length === 0) {
-      // 主源请求成功但 0 命中：这是「没检索到」，不是故障。不降级 Crossref、不产聚类，
-      // 直接返回空结果让用户换检索词，避免把 Crossref 噪声当成领域样本下判定。
-      const report: ServerReport = {
-        job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
-        sourceReports: [
-          { source: "openalex", filter: oaFilter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0 },
-        ],
-        totalBeforeDedup: 0,
-        totalAfterDedup: 0,
-        removedByDedup: 0,
-        abstractCoverage: 0,
-        oaCoverage: 0,
-        limitations: [`未检索到「${query}」相关结果，建议更换检索词后重试。`],
-        sampleFrame: SEARCH_SAMPLE_FRAME,
-        fromCache: false,
-        degraded: false,
-        retrievedAt,
-      };
-      return { papers: [], report, source: "openalex", degraded: false, detail: "未检索到相关结果，建议换检索词" };
-    }
-
-    const s2 = await s2Promise;
+    const zhPapers = isZh && !zhCrError
+      ? zhCrPapers.filter((paper) => zhRelevant(paper, zhTrigrams(query)))
+      : [];
     const limitations: string[] = [];
     const sourceReports: ServerSourceReport[] = [];
     let merged = oaPapers;
@@ -1472,6 +1496,7 @@ async function serverRetrieve(query: string): Promise<{
       source: "openalex", filter: oaFilter, returned: oaPapers.length, failed: false,
       abstractCoverage: oaCov.abstractCoverage, oaCoverage: oaCov.oaCoverage,
     });
+    if (oaPapers.length === 0) limitations.push("OpenAlex 未检索到匹配结果。");
     if (s2.papers.length > 0) {
       const result = mergeS2(oaPapers, s2.papers);
       merged = result.papers;
@@ -1486,9 +1511,9 @@ async function serverRetrieve(query: string): Promise<{
       sourceReports.push({
         source: "semanticscholar", filter: s2Filter, returned: 0, failed: false, abstractCoverage: 0, oaCoverage: 0,
       });
-      limitations.push("Semantic Scholar 未检索到匹配结果，本次结果只来自 OpenAlex。");
+      limitations.push("Semantic Scholar 未检索到匹配结果。");
     } else {
-      const reason = `Semantic Scholar 暂不可用（${s2.error}），本次结果只来自 OpenAlex。`;
+      const reason = `Semantic Scholar 暂不可用（${s2.error}），本次结果来自其他已成功的来源。`;
       sourceReports.push({
         source: "semanticscholar", filter: s2Filter, returned: 0, failed: true,
         error: reason, abstractCoverage: 0, oaCoverage: 0,
@@ -1503,7 +1528,6 @@ async function serverRetrieve(query: string): Promise<{
           error: `Crossref 中文补充不可用（${zhCrError}）`, abstractCoverage: 0, oaCoverage: 0,
         });
       } else {
-        const zhPapers = zhCrPapers.filter((paper) => zhRelevant(paper, zhTrigrams(query)));
         const zhCov = serverCoverage(zhPapers);
         sourceReports.push({
           source: "crossref", filter: crZhFilter, returned: zhPapers.length, failed: false,
@@ -1525,6 +1549,28 @@ async function serverRetrieve(query: string): Promise<{
       } else {
         limitations.push("自动翻译不可用（模型未配置或调用失败），本次只用中文原词检索；OpenAlex 与 Semantic Scholar 以英文索引为主，中文召回可能偏少。");
       }
+    }
+
+    if (merged.length === 0) {
+      limitations.push(`未检索到「${query}」相关结果，建议更换检索词后重试。`);
+      const report: ServerReport = {
+        job: { rawQuestion: query, queryVariants, constraints: {}, sourcePlan: ["openalex", "semanticscholar", "crossref"] },
+        sourceReports,
+        totalBeforeDedup: 0,
+        totalAfterDedup: 0,
+        removedByDedup: 0,
+        abstractCoverage: 0,
+        oaCoverage: 0,
+        limitations,
+        sampleFrame: SEARCH_SAMPLE_FRAME,
+        fromCache: false,
+        degraded: false,
+        retrievedAt,
+      };
+      return { papers: [], report, source: "openalex", degraded: false, detail: "未检索到相关结果，建议换检索词" };
+    }
+    if (oaPapers.length === 0) {
+      limitations.push("主源 OpenAlex 未命中，本次样本来自其他来源；来源构成与检索偏差已在检索快照中列出。");
     }
 
     const before = merged.length;
@@ -1551,9 +1597,9 @@ async function serverRetrieve(query: string): Promise<{
     return {
       papers: deduped,
       report,
-      source: "openalex",
+      source: oaPapers.length > 0 ? "openalex" : s2.papers.length > 0 ? "semanticscholar" : "crossref",
       degraded: false,
-      detail: `在线检索（站点服务端）：OpenAlex ${oaPapers.length} 篇主源` +
+      detail: `在线检索（站点服务端）：OpenAlex ${oaPapers.length} 篇` +
         (s2.papers.length > 0 ? ` + Semantic Scholar 补充合并` : "") +
         `，去重后 ${deduped.length} 篇；结果已缓存 12 小时供所有访客共享，不随访客数消耗上游额度。` +
         (enQuery ? `中文检索词已译为英文「${enQuery}」，中英双语检索。` : ""),
@@ -1561,7 +1607,7 @@ async function serverRetrieve(query: string): Promise<{
   } catch (oaError) {
     const reason = oaError instanceof Error ? oaError.message : "未知错误";
     const crFilter = `query.bibliographic:${query}`;
-    const fetched = await fetchCrossrefServer(query, retrievedAt, crFilter);
+    const fetched = await fetchCrossrefServer(query, retrievedAt, crFilter, fromYear, toYear);
     // 只有主源请求失败才走到这里；Crossref 是宽匹配，必须按检索词 token 过滤掉噪声。
     const tokens = queryTokens(query);
     const relevant = fetched.filter((paper) => crossrefRelevant(paper, tokens));
@@ -1631,6 +1677,31 @@ async function serverRetrieve(query: string): Promise<{
   }
 }
 
+function searchCacheTtl(result: { papers: ServerPaper[]; report: ServerReport; degraded: boolean }): number {
+  return result.degraded || result.papers.length === 0 || result.report.sourceReports.some((source) => source.failed)
+    ? SEARCH_RETRY_CACHE_TTL_MS
+    : SEARCH_CACHE_TTL_MS;
+}
+
+async function readBodyText(request: Request): Promise<string> {
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      throw new RangeError("body_too_large");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
 function checkSearchRate(request: Request): boolean {
   const now = Date.now();
   const key = clientIp(request);
@@ -1672,26 +1743,29 @@ export async function handler(request: Request): Promise<Response> {
     const refresh = url.searchParams.get("refresh") === "1";
     if (!refresh) {
       const cached = searchCache.get(cacheKey);
-      if (cached && Date.now() - cached.ts <= SEARCH_CACHE_TTL_MS) {
+      if (cached && Date.now() - cached.ts <= cached.ttlMs) {
+        const minutes = Math.round(cached.ttlMs / 60000);
         return json(
           {
             ok: true,
             papers: cached.papers,
             report: { ...cached.report, fromCache: true },
-            source: cached.report.degraded ? "crossref" : "openalex",
+            source: cached.source,
             degraded: cached.report.degraded,
             cached: true,
             detail: cached.papers.length === 0
-              ? "未检索到相关结果，建议换检索词（命中站点共享缓存）。"
-              : `命中站点共享缓存：${cached.papers.length} 篇，12 小时内重复检索不消耗上游额度。`,
+              ? `未检索到相关结果，建议换检索词（命中站点共享缓存，${minutes} 分钟后重试）。`
+              : `命中站点共享缓存：${cached.papers.length} 篇，${minutes} 分钟内重复检索不消耗上游额度。`,
           },
           200,
         );
       }
     }
+    const translationBudgetAllowed = containsCjk(q) && Boolean(Deno.env.get("QWEN_API_KEY")) && checkRateLimit(request);
     try {
-      const result = await serverRetrieve(q);
-      searchCache.set(cacheKey, { ts: Date.now(), papers: result.papers, report: result.report });
+      const result = await serverRetrieve(q, translationBudgetAllowed);
+      const ttlMs = searchCacheTtl(result);
+      searchCache.set(cacheKey, { ts: Date.now(), ttlMs, papers: result.papers, report: result.report, source: result.source });
       if (searchCache.size > SEARCH_CACHE_MAX) {
         const oldest = [...searchCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
         if (oldest) searchCache.delete(oldest[0]);
@@ -1730,23 +1804,17 @@ export async function handler(request: Request): Promise<Response> {
     );
   }
 
-  if (!checkRateLimit(request)) {
-    return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
-  }
-
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > MAX_BODY_BYTES) {
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return fail("bad_request", "请求内容太大。", 413);
   }
 
   let raw: string;
   try {
-    raw = await request.text();
-  } catch {
+    raw = await readBodyText(request);
+  } catch (error) {
+    if (error instanceof RangeError) return fail("bad_request", "请求内容太大。", 413);
     return fail("bad_request", "请求内容读不出来。", 400);
-  }
-  if (raw.length > MAX_BODY_BYTES) {
-    return fail("bad_request", "请求内容太大。", 413);
   }
 
   let body: unknown;
@@ -1773,6 +1841,9 @@ export async function handler(request: Request): Promise<Response> {
     const papers = readReviewPapers(payload?.papers);
     if (papers.length === 0) {
       return fail("bad_request", ERROR_MESSAGE.bad_request, 400);
+    }
+    if (!checkRateLimit(request)) {
+      return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
     }
     const result = await callModel(apiKey, REVIEW_SYSTEM_PROMPT, { context, papers }, 4096);
     if ("error" in result) {
@@ -1803,6 +1874,9 @@ export async function handler(request: Request): Promise<Response> {
     const papers = readFeasibilityPapers(payload?.papers);
     if (!idea || !capability || papers.length === 0) {
       return fail("bad_request", ERROR_MESSAGE.bad_request, 400);
+    }
+    if (!checkRateLimit(request)) {
+      return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
     }
     const target = isRecord(payload?.target)
       ? {
@@ -1850,7 +1924,11 @@ export async function handler(request: Request): Promise<Response> {
       return fail("bad_request", "请先输入一个问题。", 400);
     }
     const papers = readChatPapers(payload?.papers);
-    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
+    const allowedPaperIds = new Set(papers.map((paper) => paper.paperId).filter(Boolean));
+    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence, allowedPaperIds);
+    if (!checkRateLimit(request)) {
+      return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
+    }
     const result = await callModel(
       apiKey,
       CHAT_SYSTEM_PROMPT,
@@ -1873,10 +1951,15 @@ export async function handler(request: Request): Promise<Response> {
   if (action === "plan") {
     const constraints = parseConstraints(payload?.constraints);
     const resources = parseResources(payload?.resources);
-    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence);
+    const allowedTitles = new Set(context.clusters.flatMap((cluster) => cluster.papers)
+      .map((paper) => normalizeTitle(paper.title)));
+    const verifiedEvidence = readVerifiedEvidence(payload?.verifiedEvidence, undefined, allowedTitles);
     const draftConclusions = readDraftConclusions(payload?.draftConclusions);
     const checkupSummary = readSummary(payload?.checkupSummary);
     const reviewSummary = readSummary(payload?.reviewSummary);
+    if (!checkRateLimit(request)) {
+      return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
+    }
     const result = await callModel(
       apiKey,
       `${PLAN_SYSTEM_PROMPT}\n${PLAN_RESOURCE_RULE}`,
@@ -1901,7 +1984,7 @@ export async function handler(request: Request): Promise<Response> {
     if ("error" in result) {
       return fail(result.error, ERROR_MESSAGE[result.error] ?? ERROR_MESSAGE.upstream_error, result.status);
     }
-    const plan = parsePlan(extractJson(result.content), allowed);
+    const plan = parsePlan(extractJson(result.content), context);
     if (!plan) {
       return fail(
         result.truncated ? "upstream_truncated" : "upstream_invalid_output",
@@ -1920,6 +2003,9 @@ export async function handler(request: Request): Promise<Response> {
     );
   }
 
+  if (!checkRateLimit(request)) {
+    return fail("rate_limited", ERROR_MESSAGE.rate_limited, 429);
+  }
   const result = await callModel(apiKey, SYSTEM_PROMPT, context);
   if ("error" in result) {
     return fail(result.error, ERROR_MESSAGE[result.error] ?? ERROR_MESSAGE.upstream_error, result.status);

@@ -25,6 +25,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import vm from "node:vm";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -46,6 +49,8 @@ const EXTRA_ENTRIES = [
   ["radar", "lib/analysis/radar.ts"],
   ["metrics", "lib/metrics/classification.ts"],
   ["grounding", "lib/ai/grounding.ts"],
+  ["markdown", "components/Markdown.tsx"],
+  ["chat", "functions/chat.ts"],
 ];
 
 // ---------------------------------------------------------------------------
@@ -874,7 +879,8 @@ function installUpstreamMock() {
   const calls = [];
   const s2Requests = [];
   const oaResponseAt = [];
-  const scenario = { openalex: "ok", s2: "ok", model: "ok", oaDelayMs: 0 };
+  const modelRequests = [];
+  const scenario = { openalex: "ok", s2: "ok", model: "ok", modelJson: null, oaDelayMs: 0 };
   globalThis.fetch = async (input, init) => {
     const href = String(input);
     calls.push(href);
@@ -882,6 +888,7 @@ function installUpstreamMock() {
     if (url.hostname === "api.openalex.org") {
       if (scenario.openalex === "throw") throw new Error("mock: OpenAlex 网络不可达");
       if (scenario.openalex === "500") return new Response("upstream boom", { status: 500 });
+      if (scenario.openalex === "empty") return Response.json({ results: [], meta: { count: 0 } });
       if (scenario.oaDelayMs) await new Promise((resolve) => setTimeout(resolve, scenario.oaDelayMs));
       const sort = url.searchParams.get("sort") ?? "";
       const works = sort.startsWith("publication_date") ? OA_RECENT : OA_CLASSIC;
@@ -903,18 +910,19 @@ function installUpstreamMock() {
     }
     if (url.hostname === "maas.qianwenaiapi.com") {
       if (scenario.model === "fail") return new Response("model boom", { status: 500 });
+      const request = JSON.parse(init?.body ?? "{}");
+      const userPayload = JSON.parse(request?.messages?.[1]?.content ?? "{}");
+      modelRequests.push(userPayload);
+      if (scenario.modelJson) {
+        return Response.json({ choices: [{ message: { content: JSON.stringify(scenario.modelJson) }, finish_reason: "stop" }] });
+      }
       // "echo"：把原词里的拉丁专有名词回显进译词，用来测「专有名词已核对保留」路径；
       // 默认固定译词不含任何原词名词，用来测「译词缺失已补回」路径。
       let en = "medical image segmentation";
       if (scenario.model === "echo") {
-        try {
-          const req = JSON.parse(init?.body ?? "{}");
-          const zhRaw = typeof req?.messages?.[1]?.content === "string" ? JSON.parse(req.messages[1].content).zh ?? "" : "";
-          const latin = (zhRaw.match(/[A-Za-z][A-Za-z0-9+.\-]{1,}/g) ?? []).filter((t) => t.length >= 2);
-          if (latin.length > 0) en = `state space ${latin.join(" ")} segmentation`;
-        } catch {
-          // 保持默认译词
-        }
+        const zhRaw = userPayload.zh ?? "";
+        const latin = (zhRaw.match(/[A-Za-z][A-Za-z0-9+.\-]{1,}/g) ?? []).filter((t) => t.length >= 2);
+        if (latin.length > 0) en = `state space ${latin.join(" ")} segmentation`;
       }
       return Response.json({
         choices: [{ message: { content: JSON.stringify({ en }) }, finish_reason: "stop" }],
@@ -927,6 +935,7 @@ function installUpstreamMock() {
     scenario,
     s2Requests,
     oaResponseAt,
+    modelRequests,
     countCalls(host) {
       return calls.filter((href) => new URL(href).hostname === host).length;
     },
@@ -966,6 +975,9 @@ async function testHandlerServer() {
   const Q_CR_THROW = "regression crossref network";
   const Q_S2_ANON = "regression s2 without key";
   const Q_S2_EMPTY = "regression s2 zero hit";
+  const Q_OA_ZERO = "regression primary zero secondary hit";
+  const Q_ALL_ZERO = "regression all sources zero hit";
+  const Q_ZH_CR_ONLY = "中文零命中 医学图像分割 仅Crossref";
   const Q_S2_GAP_A = "regression s2 rate gap a";
   const Q_S2_GAP_B = "regression s2 rate gap b";
   const Q_PARALLEL = "regression parallel sources";
@@ -1073,7 +1085,7 @@ async function testHandlerServer() {
       ok(s2Report, "失败的第二源也要出现在 sourceReports 里");
       eq(s2Report.failed, true);
       eq(s2Report.returned, 0);
-      ok(s2Report.error.includes("只来自 OpenAlex"), "应说明本次结果仅来自主源");
+      ok(s2Report.error.includes("其他已成功的来源"), "应说明结果来自其他已成功来源");
       ok(s2Report.error.includes("HTTP 429"), "失败原因要带上游状态码，便于判断是限流还是故障");
       ok(body.papers.length > 0);
       eq(body.papers.length, 3, "OpenAlex 4 篇去重后 3 篇");
@@ -1097,6 +1109,151 @@ async function testHandlerServer() {
       ok(!body.report.limitations.join("").includes("暂不可用"), "0 命中不得报成不可用");
       ok(body.papers.length > 0, "主源结果照常返回");
       mock.scenario.s2 = "ok";
+    });
+
+    await groupAsync("handler: OpenAlex 0 命中 => 等待并使用 S2 结果，不提前丢数据", async () => {
+      mock.scenario.openalex = "empty";
+      mock.scenario.s2 = "ok";
+      const { status, body } = await search(Q_OA_ZERO);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.source, "semanticscholar", "主源 0 命中时结果应归属第二主源");
+      eq(body.degraded, false);
+      eq(body.papers.length, 3, "应保留 S2 三篇结果");
+      const reports = body.report.sourceReports;
+      eq(reports.map((r) => r.source), ["openalex", "semanticscholar"], "两源报告都要留痕");
+      eq(reports[0].returned, 0);
+      eq(reports[1].returned, 3);
+      ok(body.report.limitations.join("").includes("主源 OpenAlex 未命中"));
+      mock.scenario.openalex = "ok";
+    });
+
+    await groupAsync("handler: OpenAlex 与 S2 均 0 命中 => 总体 0 命中且不降级", async () => {
+      mock.scenario.openalex = "empty";
+      mock.scenario.s2 = "empty";
+      const { status, body } = await search(Q_ALL_ZERO);
+      eq(status, 200);
+      eq(body.ok, true);
+      eq(body.papers.length, 0);
+      eq(body.degraded, false);
+      eq(body.report.sourceReports.map((r) => [r.source, r.failed]), [["openalex", false], ["semanticscholar", false]], "两源都成功但 0 命中，不是故障");
+      ok(body.report.limitations.join("").includes("未检索到"));
+      const cached = await search(Q_ALL_ZERO);
+      eq(cached.body.cached, true);
+      ok(cached.body.detail.includes("2 分钟"), "0 命中只能短缓存，避免锁死临时故障");
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+    });
+
+    await groupAsync("handler: 对话 answer 内元数据清洗并恢复 refs/evidenceIds", async () => {
+      mock.scenario.modelJson = {
+        answer: "**样本提示增长** [refs:{\"n\":1,\"field\":\"摘要\"}]。\n近三年占比 60%，evidenceIds:[\"corpus:size\"]。\n[1] Current Segmentation Paper · 摘要 cluster:mamba:recentShare",
+      };
+      const res = await handler(new Request("https://site.test/functions/v1/app/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-forwarded-for": "10.9.0.9" },
+        body: JSON.stringify({
+          context: {
+            query: "medical image segmentation",
+            corpus: { size: 20, yearRange: [2020, 2026], clusterCount: 1 },
+            clusters: [{ name: "mamba", size: 20, sizeShare: 1, yearRange: [2020, 2026], medianYear: 2024, recentShare: 0.6, papers: [{ title: "Current Segmentation Paper", year: 2025, citedByCount: 9 }] }],
+            evidence: [{ id: "corpus:size", kind: "corpus", label: "样本规模", value: "20 篇", origin: "检索快照" }],
+          },
+          messages: [{ role: "user", content: "当前样本是否支持增长判断？" }],
+          papers: [{ n: 1, paperId: "current", title: "Current Segmentation Paper", year: 2025, abstract: "A segmentation abstract." }],
+          verifiedEvidence: [],
+        }),
+      }));
+      const body = await res.json();
+      eq(res.status, 200);
+      eq(body.answer, "**样本提示增长**。\n近三年占比 60%。");
+      eq(body.refs, [{ n: 1, field: "摘要" }]);
+      eq(body.evidenceIds, ["corpus:size"]);
+      ok(!/refs:|evidenceIds|cluster:/.test(body.answer));
+    });
+
+    await groupAsync("handler: 非法请求不扣模型预算 / 中文按 UTF-8 字节限额", async () => {
+      const modelBefore = mock.countCalls("maas.qianwenaiapi.com");
+      for (let i = 0; i < 25; i++) {
+        const res = await handler(new Request("https://site.test/functions/v1/app/directions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-forwarded-for": "10.9.0.1" },
+          body: "not-json",
+        }));
+        eq(res.status, 400);
+      }
+      const huge = await handler(new Request("https://site.test/functions/v1/app/directions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-forwarded-for": "10.9.0.2" },
+        body: JSON.stringify({ padding: "医".repeat(40000) }),
+      }));
+      eq(huge.status, 413, "3 字节汉字必须按 UTF-8 字节计数");
+      eq(mock.countCalls("maas.qianwenaiapi.com"), modelBefore, "非法 JSON 与超大请求不得消耗模型预算");
+    });
+
+    await groupAsync("handler: 方案保留指标口径、过滤历史证据并重建引用白名单", async () => {
+      const context = {
+        query: "medical image segmentation",
+        corpus: { size: 20, yearRange: [2020, 2026], clusterCount: 1 },
+        clusters: [{ name: "segmentation", papers: [{ title: "Current Segmentation Paper", year: 2025, venue: "Venue", citedByCount: 9 }] }],
+        pairs: [],
+        evidence: [{ id: "corpus:size", kind: "corpus", label: "样本规模", value: "20 篇", origin: "检索快照" }],
+      };
+      mock.scenario.modelJson = {
+        title: "方案",
+        sections: { references: "Fabricated Reference [99]", evidenceIndex: "fake:id = 999" },
+        evidenceIds: ["corpus:size", "fake:id"],
+      };
+      try {
+        const res = await handler(new Request("https://site.test/functions/v1/app/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-forwarded-for": "10.9.0.3" },
+          body: JSON.stringify({
+            context,
+            constraints: { metricCaliber: "Dice 与 mIoU 不可直接互换" },
+            verifiedEvidence: [
+              { paperId: "old", paperTitle: "Historical Paper", fields: [{ label: "方法", value: "旧样本证据" }] },
+              { paperId: "current", paperTitle: "Current Segmentation Paper", fields: [{ label: "方法", value: "当前样本证据" }] },
+            ],
+          }),
+        }));
+        const body = await res.json();
+        eq(res.status, 200);
+        const sent = mock.modelRequests.at(-1);
+        eq(sent.constraints.metricCaliber, "Dice 与 mIoU 不可直接互换");
+        eq(sent.verifiedEvidence.map((item) => item.paperId), ["current"], "历史论文核对证据必须过滤");
+        ok(body.plan.sections.references.includes("Current Segmentation Paper"));
+        ok(!body.plan.sections.references.includes("Fabricated"));
+        ok(body.plan.sections.evidenceIndex.includes("corpus:size"));
+        ok(!body.plan.sections.evidenceIndex.includes("fake:id"));
+      } finally {
+        mock.scenario.modelJson = null;
+      }
+    });
+
+    await groupAsync("handler: 中文双主源 0 命中 => 使用 Crossref 中文结果", async () => {
+      mock.scenario.openalex = "empty";
+      mock.scenario.s2 = "empty";
+      mock.scenario.model = "ok";
+      const { status, body } = await search(Q_ZH_CR_ONLY);
+      eq(status, 200);
+      eq(body.source, "crossref");
+      eq(body.papers.length, 1, "中文 Crossref 结果不得因双主源 0 命中被丢弃");
+      eq(body.papers[0].provenance.source, "crossref");
+      eq(body.papers[0].oaUrl, null, "Crossref PDF 链接不等于已核验开放获取");
+      eq(body.papers[0].oaStatus, "publisher_only");
+      eq(body.report.sourceReports.map((r) => r.source), ["openalex", "semanticscholar", "crossref"]);
+      ok(body.report.limitations.join("").includes("主源 OpenAlex 未命中"));
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+    });
+
+    await groupAsync("handler: C++ 符号结尾专名不会被词边界误判", async () => {
+      mock.scenario.openalex = "ok";
+      mock.scenario.s2 = "ok";
+      mock.scenario.model = "ok";
+      const { body } = await search("C++ 医学图像分割 符号专名");
+      ok(body.report.limitations.join("").includes("C++"), "译词丢失 C++ 时应原样补回并留痕");
     });
 
     await groupAsync("handler: 相同 query 二次调用命中 12h 共享缓存", async () => {
@@ -1155,6 +1312,7 @@ async function testHandlerServer() {
       mock.scenario.openalex = "ok";
       mock.scenario.s2 = "ok";
       mock.scenario.model = "ok";
+      const modelBefore = mock.countCalls("maas.qianwenaiapi.com");
       const Q_ZH = "中文检索回归 医学图像分割";
       const { status, body } = await search(Q_ZH);
       eq(status, 200);
@@ -1169,7 +1327,7 @@ async function testHandlerServer() {
       eq(zhReport.returned, 1, "中文三字组过滤应留下 1 篇相关、滤掉 1 篇无关");
       ok(body.report.limitations.join("").includes("已译为英文"), "要说明机器翻译与双语检索口径");
       ok(body.report.limitations.join("").includes("Crossref 按中文原题补充 1 篇"));
-      eq(mock.countCalls("maas.qianwenaiapi.com"), 1, "翻译恰好调用一次模型");
+      eq(mock.countCalls("maas.qianwenaiapi.com") - modelBefore, 1, "翻译恰好调用一次模型");
       eq(body.report.removedByDedup >= 1, true, "多源合并后应存在去重");
       eq(body.papers.length, 5, "OA 4 篇 + S2 新增 1 篇 + Crossref 中文 1 篇 - 标题重复 1 篇");
     });
@@ -1325,7 +1483,17 @@ function findSparseCluster(radarResult) {
   return radarResult.clusters.find((c) => c.size === 4 && c.sizeShare < 0.05) ?? null;
 }
 
-function testSparseClusterVerdict({ analyzeTopics, VERDICT_META }) {
+function testSparseClusterVerdict({ analyzeTopics, classifyCoverage, VERDICT_META }) {
+  group("radar: emerging/saturated 阈值边界直接可测", () => {
+    eq(classifyCoverage(9, 0.2, 0.8, 2026, 2026), "insufficient", "样本数优先于增长窗口");
+    eq(classifyCoverage(10, 0.099, 0.6, 2026, 2026), "emerging", "占比低于 10% 且近期达到 60%");
+    eq(classifyCoverage(10, 0.099, 0.599, 2026, 2026), "mature", "近期低于 60% 不判增长窗口");
+    eq(classifyCoverage(10, 0.1, 0.8, 2026, 2026), "mature", "占比达到 10% 不判小簇增长");
+    eq(classifyCoverage(20, 0.12, 0.35, 2022, 2026), "saturated", "高密度且中位年份足够早");
+    eq(classifyCoverage(20, 0.119, 0.2, 2020, 2026), "mature", "占比低于 12% 不判高密度成熟");
+    eq(classifyCoverage(20, 0.2, 0.351, 2022, 2026), "mature", "近期高于 35% 不判高密度成熟");
+  });
+
   const papers = makeSparseCorpus();
   const first = analyzeTopics(papers);
   const sparse = findSparseCluster(first);
@@ -1523,8 +1691,8 @@ async function testThresholdStability({ analyzeTopics }) {
   // 供报告使用的稳定性统计
   console.log(
     `stability: 阈值扰动 ${stats.applied}/${stats.planned} 组生效` +
-      `（0.1 / 0.12 / 0.6 × ±20%），稀疏簇判定翻转 ${stats.flips} 次，` +
-      `基线 verdict=${stats.baseline}` +
+      `（0.1 / 0.12 / 0.6 × ±20%），仅验证稀疏簇保护规则不翻转 ${stats.flips} 次，` +
+      `基线 verdict=${stats.baseline}；emerging/saturated 边界由独立用例覆盖` +
       (stats.skipped.length > 0 ? `，未匹配跳过: ${stats.skipped.join(", ")}` : ""),
   );
   for (const detail of stats.details) {
@@ -1698,6 +1866,118 @@ function testNumberAudit({ auditTextNumbers, buildNumericWhitelist }) {
   });
 }
 
+async function testServiceWorkerUpgrade() {
+  const source = await readFile(path.join(root, "public/sw.js"), "utf8");
+  const stores = new Map();
+  const makeCache = () => ({
+    entries: new Map(),
+    async add() {},
+    async put(request, response) { this.entries.set(request instanceof Request ? request.url : String(request), response.clone()); },
+    async match(request) { return this.entries.get(request instanceof Request ? request.url : String(request)); },
+  });
+  const cacheFor = async (key) => {
+    if (!stores.has(key)) stores.set(key, makeCache());
+    return stores.get(key);
+  };
+  for (const [version, at] of [["oldest", 1], ["older", 2], ["old", 3]]) {
+    for (const suffix of ["shell", "assets"]) {
+      const cache = await cacheFor(`topicscope-${version}-${suffix}`);
+      await cache.put("/__topicscope_cache_version__", Response.json({ version, installedAt: at }));
+    }
+  }
+  const legacy = await cacheFor("topicscope-old-assets");
+  await legacy.put("https://site.test/assets/legacy.js", new Response("legacy", { status: 200 }));
+  const listeners = {};
+  const context = {
+    URL, Response, console, TextDecoder,
+    caches: {
+      open: cacheFor,
+      keys: async () => [...stores.keys()],
+      delete: async (key) => stores.delete(key),
+    },
+    fetch: async (input) => {
+      if (String(input).endsWith("/precache-manifest.json")) return Response.json({ urls: [] });
+      throw new Error("offline");
+    },
+    self: {
+      location: { origin: "https://site.test" },
+      addEventListener: (name, fn) => { listeners[name] = fn; },
+      skipWaiting: async () => {},
+      clients: { claim: async () => {} },
+    },
+  };
+  vm.runInNewContext(source, context);
+  let installPromise;
+  listeners.install({ waitUntil: (promise) => { installPromise = promise; } });
+  await installPromise;
+  let activatePromise;
+  listeners.activate({ waitUntil: (promise) => { activatePromise = promise; } });
+  await activatePromise;
+
+  await groupAsync("service-worker: 升级保留最近三个版本并清理更旧缓存", () => {
+    const keys = [...stores.keys()];
+    eq(keys.length, 6, "当前版本与两个旧版本各保留 shell/assets");
+    ok(!keys.some((key) => key.startsWith("topicscope-oldest-")), "最旧版本应被清理");
+    ok(keys.some((key) => key.startsWith("topicscope-older-")), "最近两个旧版本应保留");
+    ok(keys.some((key) => key.startsWith("topicscope-old-")), "上一版本必须保留");
+  });
+
+  await groupAsync("service-worker: 新缓存未命中时回退旧版本懒加载 chunk", async () => {
+    let response;
+    const request = new Request("https://site.test/assets/legacy.js", { mode: "cors", destination: "script" });
+    await listeners.fetch({
+      request,
+      respondWith: (promise) => { response = promise; },
+      waitUntil: () => {},
+    });
+    const result = await response;
+    eq(result.status, 200);
+    eq(await result.text(), "legacy");
+  });
+}
+
+function testChatAnswer({ cleanChatAnswer }) {
+  group("chat: 清除 answer 内重复引用元数据并恢复结构化字段", () => {
+    const cleaned = cleanChatAnswer([
+      "当前样本中，**mamba 方向**仍处于增长窗口 [refs:{\"n\":2,\"field\":\"摘要\"}]。",
+      "近三年占比偏高 refs:[{\"n\":4,\"field\":\"标题\"}]，evidenceIds:[\"cluster:mamba:recentShare\"]，需扩大检索验证。",
+      "[2] VM-UNet · 摘要 cluster:mamba:medianYear | cluster:mamba:recentShare",
+    ].join("\n"));
+    eq(cleaned.text, "当前样本中，**mamba 方向**仍处于增长窗口。\n近三年占比偏高，需扩大检索验证。");
+    eq(cleaned.refs, [{ n: 2, field: "摘要" }, { n: 4, field: "标题" }]);
+    eq(cleaned.evidenceIds, ["cluster:mamba:recentShare"]);
+    ok(!/refs:|evidenceIds|cluster:/.test(cleaned.text));
+  });
+
+  group("chat: 保留正常 Markdown 与正文中的方括号编号", () => {
+    const cleaned = cleanChatAnswer("**结论**\n\n- [1] 只是文献编号\n- 下一步补数据");
+    eq(cleaned.text, "**结论**\n\n- [1] 只是文献编号\n- 下一步补数据");
+    eq(cleaned.refs, []);
+    eq(cleaned.evidenceIds, []);
+  });
+}
+
+function testMarkdown({ Markdown }) {
+  const render = (text) => renderToStaticMarkup(createElement(Markdown, { text }));
+  group("markdown: 安全渲染粗体、列表、代码、链接、表格与引用", () => {
+    const html = render("**结论**\n\n- `Dice`\n- [论文](https://example.org/paper)\n\n| 指标 | 数值 |\n| --- | --- |\n| Dice | 0.9 |\n\n> 证据边界\n\n```js\nconst x = 1;\n```");
+    ok(html.includes("<strong") && html.includes(">结论</strong>"));
+    ok(html.includes(">Dice</code>"));
+    ok(html.includes("<table") && html.includes(">指标</th>") && html.includes(">0.9</td>"));
+    ok(html.includes("<blockquote") && html.includes("证据边界"));
+    ok(html.includes("<pre") && html.includes("const x = 1;"));
+    ok(html.includes('href="https://example.org/paper"'));
+    ok(!html.includes("**") && !html.includes("```"));
+  });
+
+  group("markdown: HTML 与危险协议保持纯文本", () => {
+    const html = render('<img src=x onerror="alert(1)"> [危险](javascript:alert(1)) [数据](data:text/html,x)');
+    ok(!html.includes("<img") && !html.includes("<script"), "模型 HTML 不得成为真实元素");
+    ok(!html.includes('href="javascript:') && !html.includes('href="data:'));
+    ok(html.includes("&lt;img") && html.includes("[危险](javascript:alert(1))"));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
@@ -1709,6 +1989,7 @@ testPlan(mods.plan);
 testReview(mods.review);
 testEvidenceMerge(mods.evidence);
 await testHandlerServer();
+await testServiceWorkerUpgrade();
 
 const extra = await loadExtraModules();
 if (extra.radar) {
@@ -1717,6 +1998,8 @@ if (extra.radar) {
 }
 if (extra.metrics) testConfusionValidation(extra.metrics);
 if (extra.grounding) testNumberAudit(extra.grounding);
+if (extra.markdown) testMarkdown(extra.markdown);
+if (extra.chat) testChatAnswer(extra.chat);
 
 // 导出头部必须带检索元数据（M7）：脱离站点仍可复现
 const exportMods = await loadModules([["exportmod", "lib/export.ts"]]);

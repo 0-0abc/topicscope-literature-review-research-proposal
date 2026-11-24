@@ -15,7 +15,6 @@ import {
   RESOURCE_STATUS_LABEL,
   buildEvidenceIndexText,
   findUnauthorizedResourceTerms,
-  isPlaceholderSection,
   parsePlan,
   resolvePlanEvidence,
   type PlanConstraints,
@@ -148,8 +147,129 @@ interface VerifiedEvidence {
   fields: { key: string; label: string; value: string; location?: string; verifiedAt?: string }[];
 }
 
+/** 随结构化方案一起进入现有存档契约，避免离页后丢失生成时输入。 */
+interface FrozenPlanSnapshot {
+  context: DirectionContext | null;
+  report: SearchReport | null;
+  papers: Paper[];
+  constraints: Record<string, string>;
+  resources: ResourceDraft[];
+  verified: VerifiedEvidence[];
+  draftConclusions: string[];
+  checkupSummary: string | null;
+  reviewSummary: string | null;
+  excludedPapers: string[];
+  constraintSeedToken: number | null;
+  model: string | null;
+  generatedAt: string | null;
+  revised: boolean;
+  revisedAt: string | null;
+}
+
+type PlanWithSnapshot = ResearchPlan & { frozenSnapshot?: FrozenPlanSnapshot };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readFrozenSnapshot(value: unknown): FrozenPlanSnapshot | null {
+  if (!isRecord(value)) return null;
+  if (value.context !== null && !isRecord(value.context)) return null;
+  if (value.report !== null && !isRecord(value.report)) return null;
+  if (!Array.isArray(value.papers) || !Array.isArray(value.resources) || !Array.isArray(value.verified)) return null;
+  if (!Array.isArray(value.draftConclusions) || !Array.isArray(value.excludedPapers)) return null;
+  if (!isRecord(value.constraints)) return null;
+  if (typeof value.revised !== "boolean") return null;
+  return value as unknown as FrozenPlanSnapshot;
+}
+
+function snapshotOf(plan: ResearchPlan | null | undefined): FrozenPlanSnapshot | null {
+  return readFrozenSnapshot((plan as PlanWithSnapshot | null | undefined)?.frozenSnapshot);
+}
+
+function withSnapshot(plan: ResearchPlan, snapshot: FrozenPlanSnapshot): PlanWithSnapshot {
+  return { ...plan, frozenSnapshot: snapshot };
+}
+
+function normalizedConstraints(constraints: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(constraints).filter(([, value]) => value.trim()));
+}
+
 function fingerprint(input: unknown): string {
   return JSON.stringify(input);
+}
+
+function markdownSection(markdown: string, heading: RegExp): string | null {
+  const headings = [...markdown.matchAll(/^## .+$/gm)];
+  for (let index = 0; index < headings.length; index += 1) {
+    const match = headings[index];
+    if (match.index === undefined || !heading.test(match[0])) continue;
+    const start = match.index + match[0].length;
+    const end = headings[index + 1]?.index ?? markdown.length;
+    return markdown.slice(start, end).trim();
+  }
+  return null;
+}
+
+/** 人工修订后回写结构化方案；无法识别的附录保持原结构，不从模型文本猜字段。 */
+function parseEditedPlan(markdown: string, fallback: ResearchPlan): ResearchPlan {
+  const sections = { ...fallback.sections };
+  let foundSection = false;
+  for (const section of PLAN_SECTIONS) {
+    const body = markdownSection(markdown, new RegExp(`^## ${section.number}\\. `));
+    if (body === null) continue;
+    foundSection = true;
+    sections[section.key] = body;
+  }
+  const title = markdown.match(/^# 研究方案：(.*)$/m)?.[1]?.trim();
+  const chain = markdownSection(markdown, /^## 附：逻辑链自洽检查/);
+  const scoreSection = markdownSection(markdown, /^## 附：方案评分/);
+  const scores = scoreSection === null
+    ? fallback.scores
+    : [...scoreSection.matchAll(/^- (.+?): (\d+)\/5 — (.*)$/gm)].map((match) => ({
+        dimension: match[1].trim(),
+        score: Math.min(5, Math.max(0, Number(match[2]))),
+        reason: match[3].trim(),
+      }));
+  const missingSection = markdownSection(markdown, /^## 附：待补充条件/);
+  const missing = missingSection === null
+    ? fallback.missing
+    : [...missingSection.matchAll(/^- (.+)$/gm)].map((match) => match[1].trim()).filter(Boolean);
+  const evidenceSection = markdownSection(markdown, /^## 15\. 证据索引/);
+  const evidenceIds = evidenceSection === null
+    ? fallback.evidenceIds
+    : [...evidenceSection.matchAll(/^- ([^：\n]+)：/gm)].map((match) => match[1].trim()).filter(Boolean);
+  return {
+    title: title || fallback.title,
+    sections: foundSection ? sections : fallback.sections,
+    chainAudit: chain ?? fallback.chainAudit,
+    scores,
+    missing,
+    evidenceIds,
+  };
+}
+
+function rebuildPlanReferences(
+  plan: ResearchPlan,
+  context: DirectionContext | null,
+  fullPapers: Paper[],
+): void {
+  const resolvedItems = resolvePlanEvidence(plan.evidenceIds, context?.evidence ?? []);
+  plan.evidenceIds = resolvedItems.items.map((item) => item.id);
+  plan.sections.references = buildClusterReferences(context, fullPapers);
+  plan.sections.evidenceIndex = buildEvidenceIndexText({ items: resolvedItems.items, unknown: [] });
+}
+
+function replacePlanSection(markdown: string, number: number, title: string, body: string): string {
+  const headings = [...markdown.matchAll(/^## .+$/gm)];
+  const heading = `## ${number}. ${title}`;
+  for (let index = 0; index < headings.length; index += 1) {
+    const match = headings[index];
+    if (match.index === undefined || !match[0].startsWith(`## ${number}. `)) continue;
+    const end = headings[index + 1]?.index ?? markdown.length;
+    return `${markdown.slice(0, match.index)}${heading}\n\n${body.trim()}\n\n${markdown.slice(end)}`;
+  }
+  return `${markdown.trimEnd()}\n\n${heading}\n\n${body.trim()}\n`;
 }
 
 /** 启发式互锁检查：上下游共享 >=2 个关键词视为互锁，否则标存疑供人工核对。 */
@@ -164,31 +284,23 @@ function sharesKeywords(a: string, b: string): boolean {
 
 export function PlanGenerator({ context, report, evidenceNotes, papers, draftConclusions, checkupSummary, reviewSummary, constraintSeed, restoredPlan, onPlanChange }: Props) {
   const available = useFunctionProbe();
-  const [constraints, setConstraints] = useState<Record<string, string>>({});
-  const [resources, setResources] = useState<ResourceDraft[]>([]);
+  const initialSnapshot = snapshotOf(restoredPlan?.plan);
+  const [constraints, setConstraints] = useState<Record<string, string>>(initialSnapshot?.constraints ?? {});
+  const [resources, setResources] = useState<ResourceDraft[]>(initialSnapshot?.resources ?? []);
   const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">(
     restoredPlan ? "ready" : "idle",
   );
   const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<ReturnType<typeof parsePlan>>(restoredPlan?.plan ?? null);
-  const [model, setModel] = useState<string | null>(null);
-  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [model, setModel] = useState<string | null>(initialSnapshot?.model ?? null);
+  const [generatedAt, setGeneratedAt] = useState<string | null>(initialSnapshot?.generatedAt ?? null);
   // 生成时冻结的输入与导出文本：导出/展示都用冻结版本，避免旧方案被挂到新上下文上
-  const [frozen, setFrozen] = useState<null | {
-    context: DirectionContext | null;
-    report: SearchReport | null;
-    constraints: Record<string, string>;
-    resources: ResourceDraft[];
-    verified: VerifiedEvidence[];
-    draftConclusions: string[];
-    checkupSummary: string | null;
-    reviewSummary: string | null;
-  }>(null);
+  const [frozen, setFrozen] = useState<FrozenPlanSnapshot | null>(initialSnapshot);
   const [storedMarkdown, setStoredMarkdown] = useState<string | null>(restoredPlan?.markdown ?? null);
-  const [excludedPapers, setExcludedPapers] = useState<string[]>([]);
+  const [excludedPapers, setExcludedPapers] = useState<string[]>(initialSnapshot?.excludedPapers ?? []);
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
-  const [revised, setRevised] = useState(false);
+  const [revised, setRevised] = useState(initialSnapshot?.revised ?? false);
   const [showChain, setShowChain] = useState(false);
 
   const chainLinks = useMemo(() => {
@@ -214,13 +326,17 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
 
   useEffect(() => {
     if (!constraintSeed) return;
+    if (initialSnapshot && constraintSeed.token === initialSnapshot.constraintSeedToken) return;
     setConstraints((prev) => ({ ...prev, metricCaliber: constraintSeed.text }));
-  }, [constraintSeed]);
+  }, [constraintSeed, initialSnapshot]);
 
   const verifiedAll = useMemo<VerifiedEvidence[]>(() => {
     const titleOf = new Map((papers ?? []).map((p) => [p.id, p.title]));
+    // context 不含论文 ID；当前 papers 就是该 context 的语料，按 ID 白名单排除换检索/合并残留标注。
+    const contextPaperIds = new Set(context ? (papers ?? []).map((paper) => paper.id) : []);
     const out: VerifiedEvidence[] = [];
     for (const note of Object.values(evidenceNotes ?? {})) {
+      if (!contextPaperIds.has(note.paperId)) continue;
       const fields = (note.verifiedFields ?? [])
         .map((key) => {
           const meta = EVIDENCE_FIELDS.find((f) => f.key === key);
@@ -240,7 +356,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
       }
     }
     return out;
-  }, [evidenceNotes, papers]);
+  }, [evidenceNotes, papers, context]);
 
   const verified = useMemo(
     () => verifiedAll.filter((item) => !excludedPapers.includes(item.paperId)),
@@ -254,10 +370,34 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
 
   const stale =
     frozen !== null &&
-    fingerprint({ context, report, constraints, resources, verified, draftConclusions, checkupSummary, reviewSummary }) !==
-      fingerprint(frozen);
+    fingerprint({
+      context,
+      report,
+      papers: papers ?? [],
+      constraints: normalizedConstraints(constraints),
+      resources,
+      verified,
+      draftConclusions: draftConclusions ?? [],
+      checkupSummary: checkupSummary ?? null,
+      reviewSummary: reviewSummary ?? null,
+      excludedPapers,
+      constraintSeedToken: constraintSeed?.token ?? null,
+    }) !== fingerprint({
+      context: frozen.context,
+      report: frozen.report,
+      papers: frozen.papers,
+      constraints: frozen.constraints,
+      resources: frozen.resources,
+      verified: frozen.verified,
+      draftConclusions: frozen.draftConclusions,
+      checkupSummary: frozen.checkupSummary,
+      reviewSummary: frozen.reviewSummary,
+      excludedPapers: frozen.excludedPapers,
+      constraintSeedToken: frozen.constraintSeedToken,
+    });
 
-  if (available !== "ready") {
+  const serviceUnavailable = available !== "ready";
+  if (serviceUnavailable && !restoredPlan) {
     return <AiServiceNotice status={available} feature="研究方案生成" />;
   }
 
@@ -268,7 +408,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
   };
 
   const generate = async () => {
-    if (!context) return;
+    if (!context || serviceUnavailable) return;
     setStatus("loading");
     setError(null);
     setResourceWarnings([]);
@@ -286,7 +426,23 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
         license: item.license.trim() || undefined,
         accessCondition: item.accessCondition.trim() || undefined,
       }));
-    const snapshot = { context, report, constraints: inputConstraints, resources, verified, draftConclusions: draftConclusions ?? [], checkupSummary: checkupSummary ?? null, reviewSummary: reviewSummary ?? null };
+    const snapshot: FrozenPlanSnapshot = {
+      context,
+      report,
+      papers: papers ?? [],
+      constraints: inputConstraints,
+      resources,
+      verified,
+      draftConclusions: draftConclusions ?? [],
+      checkupSummary: checkupSummary ?? null,
+      reviewSummary: reviewSummary ?? null,
+      excludedPapers,
+      constraintSeedToken: constraintSeed?.token ?? null,
+      model: null,
+      generatedAt: null,
+      revised: false,
+      revisedAt: null,
+    };
     try {
       const payload = {
         context,
@@ -322,14 +478,8 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
           `模型代猜了未提供的约束：${unauthorized.join("、")}，已移入待补充`,
         ];
       }
-      // M6 空壳修复：14/15 节为空或只有占位句时，用真实论文与证据解析结果填充
-      const resolvedItems = resolvePlanEvidence(parsed.evidenceIds, context.evidence);
-      if (isPlaceholderSection(parsed.sections.references)) {
-        parsed.sections.references = buildClusterReferences(context, papers);
-      }
-      if (isPlaceholderSection(parsed.sections.evidenceIndex)) {
-        parsed.sections.evidenceIndex = buildEvidenceIndexText(resolvedItems);
-      }
+      // 14/15 节始终由当前 context 与证据 ID 白名单重建，模型给出的非空文本也不可信。
+      rebuildPlanReferences(parsed, context, papers ?? []);
       // M3 数字回查：正文数字必须能在送入模型的统计白名单里找到
       const unmatchedNumbers = auditTextNumbers(
         PLAN_SECTIONS.map((section) => parsed.sections[section.key]).join("\n"),
@@ -337,18 +487,22 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
       );
       setResourceWarnings(unauthorized);
       setNumberWarnings(unmatchedNumbers);
+      snapshot.model = typeof body.model === "string" ? body.model : null;
+      snapshot.generatedAt = typeof body.generatedAt === "string" ? body.generatedAt : null;
       const md = buildMarkdown(parsed, {
-        model: body.model,
-        generatedAt: body.generatedAt,
+        model: snapshot.model,
+        generatedAt: snapshot.generatedAt,
         snapshot,
       });
-      setPlan(parsed);
-      setModel(typeof body.model === "string" ? body.model : null);
-      setGeneratedAt(typeof body.generatedAt === "string" ? body.generatedAt : null);
+      const structured = withSnapshot(parsed, snapshot);
+      setPlan(structured);
+      setModel(snapshot.model);
+      setGeneratedAt(snapshot.generatedAt);
       setFrozen(snapshot);
       setStoredMarkdown(md);
+      setRevised(false);
       setStatus("ready");
-      onPlanChange?.(parsed, md);
+      onPlanChange?.(structured, md);
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "生成失败，请稍后再试。");
       setStatus("error");
@@ -397,6 +551,46 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
     });
   };
 
+  const saveRevision = () => {
+    if (!plan || !storedMarkdown) return;
+    const revisedPlan = parseEditedPlan(editText, plan);
+    rebuildPlanReferences(revisedPlan, frozen?.context ?? context, frozen?.papers ?? papers ?? []);
+    const references = PLAN_SECTIONS.find((section) => section.key === "references")!;
+    const evidenceIndex = PLAN_SECTIONS.find((section) => section.key === "evidenceIndex")!;
+    const markdown = replacePlanSection(
+      replacePlanSection(editText, references.number, references.title, revisedPlan.sections.references),
+      evidenceIndex.number,
+      evidenceIndex.title,
+      revisedPlan.sections.evidenceIndex,
+    );
+    const revisedAt = new Date().toISOString();
+    const snapshot: FrozenPlanSnapshot = frozen ?? {
+      context,
+      report,
+      papers: papers ?? [],
+      constraints: normalizedConstraints(constraints),
+      resources,
+      verified,
+      draftConclusions: draftConclusions ?? [],
+      checkupSummary: checkupSummary ?? null,
+      reviewSummary: reviewSummary ?? null,
+      excludedPapers,
+      constraintSeedToken: constraintSeed?.token ?? null,
+      model,
+      generatedAt,
+      revised: false,
+      revisedAt: null,
+    };
+    const nextSnapshot = { ...snapshot, revised: true, revisedAt };
+    const structured = withSnapshot(revisedPlan, nextSnapshot);
+    setPlan(structured);
+    setFrozen(nextSnapshot);
+    setStoredMarkdown(markdown);
+    setRevised(true);
+    setEditing(false);
+    onPlanChange?.(structured, markdown);
+  };
+
   const exportPlan = () => {
     if (!plan || !storedMarkdown) return;
     const stamp = new Date().toISOString().slice(0, 10);
@@ -443,6 +637,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
 
   return (
     <div className="space-y-5">
+      {serviceUnavailable ? <AiServiceNotice status={available} feature="研究方案重新生成" /> : null}
       <Card className="gap-3 rounded-md border-border py-4 shadow-none">
         <CardContent className="space-y-4 px-4">
           <div className="space-y-1">
@@ -647,7 +842,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
             <Button
               size="sm"
               onClick={() => void generate()}
-              disabled={!context || status === "loading"}
+              disabled={!context || serviceUnavailable || status === "loading"}
             >
               {status === "loading" ? "生成中…" : "生成研究方案"}
             </Button>
@@ -670,9 +865,7 @@ export function PlanGenerator({ context, report, evidenceNotes, papers, draftCon
                   size="sm"
                   onClick={() => {
                     if (editing) {
-                      setStoredMarkdown(editText);
-                      setRevised(true);
-                      setEditing(false);
+                      saveRevision();
                     } else {
                       setEditText(storedMarkdown ?? "");
                       setEditing(true);

@@ -1,6 +1,7 @@
 import {
   accuracy,
   balancedAccuracy,
+  binaryCountsToMatrix,
   binaryStats,
   cohensKappa,
   macroF1,
@@ -10,10 +11,10 @@ import {
   stats,
   weightedF1,
 } from "./classification";
-import { meanDice, meanDiceTrap, meanIou } from "./segmentation";
+import { meanDice, meanDiceTrap, meanIou, withSegmentationUnion } from "./segmentation";
 import { rankingMetrics } from "./ranking";
 import { regressionMetrics } from "./regression";
-import { CONVERSIONS, type ConversionRule } from "./registry";
+import { computeMetrics, CONVERSIONS, type ConversionRule } from "./registry";
 import type { BinaryCounts, ConfusionMatrix, SegmentationClass } from "./types";
 
 /**
@@ -155,6 +156,30 @@ export function runSelfCheck(): SelfCheckReport {
   cases.push(check("二分类", "Specificity", "binary.specificity", 0.9891891891891892, binary.specificity!));
   cases.push(check("二分类", "MCC（计数口径）", "binary_counts.mcc", 0.7273950588619387, binary.mcc));
 
+  // 覆盖 AlignView 的计数 → 矩阵 → 指标完整路径，防止 TP/TN 对角线与 FP/FN 行列再次错位。
+  const countMatrix = binaryCountsToMatrix(BINARY_COUNTS);
+  const countMatrixResults = computeMetrics({ kind: "classification", matrix: countMatrix });
+  const positiveStat = stats(countMatrix)[1];
+  const resultValue = (id: string) => countMatrixResults.find((item) => item.id === id)?.value ?? null;
+  cases.push(
+    check("二分类", "计数转矩阵 Precision", "binary_counts.matrix_precision", 5 / 6, resultValue("precision")),
+  );
+  cases.push(
+    check("二分类", "计数转矩阵 Recall", "binary_counts.matrix_recall", 2 / 3, resultValue("recall")),
+  );
+  cases.push(
+    check("二分类", "计数转矩阵 F1", "binary_counts.matrix_f1", 10 / 13.5, positiveStat.f1),
+  );
+  cases.push(
+    check(
+      "二分类",
+      "计数转矩阵 Specificity",
+      "binary_counts.matrix_specificity",
+      915 / 925,
+      positiveStat.specificity,
+    ),
+  );
+
   // ── 多分类混淆矩阵 ────────────────────────────────────────────
   cases.push(
     check("多分类", "Accuracy", "multi.accuracy", 0.7419354838709677, accuracy(MULTICLASS_MATRIX)),
@@ -249,6 +274,29 @@ export function runSelfCheck(): SelfCheckReport {
     ),
   );
 
+  // 交集或面积变化后不得沿用旧 union；这里故意传入陈旧的 190。
+  const editedSegmentation: SegmentationClass[] = [
+    withSegmentationUnion({ label: "前景", intersection: 20, union: 190, predArea: 120, gtArea: 110 }),
+    SEGMENTATION_CLASSES[1],
+  ];
+  cases.push(
+    check(
+      "分割",
+      "编辑后重算 union",
+      "seg.edited_union",
+      210,
+      editedSegmentation[0].union,
+    ),
+  );
+  cases.push(
+    check(
+      "分割",
+      "编辑后 mIoU 不使用陈旧 union",
+      "seg.edited_miou",
+      (20 / 210 + 9 / 11) / 2,
+      meanIou(editedSegmentation),
+    ),
+  );
   // ── 排序指标 ────────────────────────────────────────────────
   const ranking = rankingMetrics(RANKING_ITEMS, 3, 1);
   cases.push(check("排序", "Precision@3", "rank.precision_at_k", 0.6666666666666666, ranking.precisionAtK!));

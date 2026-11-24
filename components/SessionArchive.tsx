@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { downloadText } from "@/lib/export";
 import { searchReportToMarkdown } from "@/lib/export";
 import type { Paper, SearchReport } from "@/lib/data/types";
-import type { EvidenceNote } from "@/hooks/useEvidenceStore";
+import { EVIDENCE_FIELDS, type EvidenceNote } from "@/hooks/useEvidenceStore";
 import type { ResearchPlan } from "@/lib/ai/plan";
 import { useSessionStore, type SavedSession, type ChatMessage, type SavedCheckup, type SavedReview } from "@/hooks/useSessionStore";
 
@@ -81,19 +81,36 @@ export function SessionArchive({
     if (session.report) {
       lines.push(searchReportToMarkdown(session.report), "");
     }
+    const paperById = new Map(session.papers.map((paper) => [paper.id, paper]));
     const verified = Object.values(session.evidenceNotes ?? {});
-    if (verified.length > 0) {
-      lines.push("## 已核对的证据", "");
-      for (const entry of verified) {
-        const fields = Object.entries(entry.fields ?? {})
-          .filter(([, value]) => value)
-          .map(([key, value]) => `- ${key}: ${value}`)
-          .join("\n");
-        if (fields) {
-          lines.push(`### ${entry.paperId}`, fields, "");
-        }
+    const verifiedLines: string[] = [];
+    for (const entry of verified) {
+      const paper = paperById.get(entry.paperId);
+      const fields = (entry.verifiedFields ?? [])
+        .map((key) => {
+          const meta = EVIDENCE_FIELDS.find((field) => field.key === key);
+          const value = entry.fields?.[key]?.trim();
+          if (!meta || !value) return null;
+          const location = entry.fieldMeta?.[key]?.location?.trim();
+          const verifiedAt = entry.fieldMeta?.[key]?.verifiedAt;
+          const where = location ? `（原文位置：${location}）` : "";
+          const when = verifiedAt ? `［核对于 ${verifiedAt.slice(0, 10)}］` : "";
+          return `- ${meta.label}${where}${when}: ${value}`;
+        })
+        .filter((line): line is string => line !== null);
+      if (fields.length > 0) {
+        const title = paper?.title ?? entry.paperId;
+        verifiedLines.push(`### ${title}（${entry.paperId}）`, "", ...fields, "");
       }
     }
+    if (verifiedLines.length > 0) {
+      lines.push("## 已核对的证据", "", ...verifiedLines);
+    }
+    lines.push("## 论文清单", "");
+    for (const paper of session.papers) {
+      lines.push(`- ${paper.title}（${paper.id}，${paper.year}）`);
+    }
+    lines.push("");
     if (session.planMarkdown) {
       lines.push("## 研究方案", "", session.planMarkdown, "");
     }

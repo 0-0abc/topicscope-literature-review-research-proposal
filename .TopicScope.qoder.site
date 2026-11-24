@@ -1,1 +1,107 @@
-{"version":1,"name":"TopicScope","design":{"version":1,"pages":[{"id":"home","path":"/","title":"TopicScope · 选题雷达","width":1440,"height":900,"elements":[{"selector":"header","title":"站点标题与检索入口"},{"selector":"input[placeholder=\"输入研究方向，例如 medical image segmentation\"]","title":"研究方向输入框"},{"selector":"button:has-text(\"在线检索\")","title":"在线检索按钮"},{"selector":"button:has-text(\"离线示例\")","title":"离线示例按钮"},{"selector":"[role=\"tablist\"]","title":"功能页签（含文献综述）"},{"selector":"[role=\"tabpanel\"]","title":"当前功能面板"},{"selector":"button:has-text(\"生成方向建议\")","title":"生成研究方向建议按钮"},{"selector":"button:has-text(\"导师汇报\")","title":"导师汇报对比页入口"},{"selector":"svg[role=\"img\"]","title":"方向按年发文量趋势图"},{"selector":"button:has-text(\"生成综述草稿\")","title":"生成文献综述草稿按钮"},{"selector":"button:has-text(\"生成研究方案\")","title":"生成研究方案按钮"},{"selector":"button:has-text(\"导出方案 Markdown\")","title":"导出研究方案按钮"},{"selector":"button:has-text(\"保存会话\")","title":"保存研究会话按钮"},{"selector":"[role=\"dialog\"]","title":"论文证据卡与导师汇报面板"},{"selector":"canvas","title":"关键词共现力导向图"},{"selector":"footer","title":"数据来源与免责说明"}]}],"capabilities":["appearance","radius","spacing","typography","motion"]},"publication":{"actionId":"a80f9e92-0d48-40eb-9a69-7837875a42c1","projectId":"01a1b047-77cd-72ce-a523-5e8578d370b4","siteId":"01a1b047-77d0-7be8-804c-ba366e1ff832","deploymentId":"01a1d4c5-e03f-79c9-b311-f56b713d7753","artifactSha256":"ac672bfb3a9e1a244150cb064fb619479203369b714643080ab200d278b5eb43","indexSha256":"5ee035d2a8d8f705f3edfd022f60928e0c3129e1b41c5d702225ee934cb5df2d","releaseId":"01a1d4c7-d938-7a5d-84a9-4cff21b94d7d","indexHtml":"PCFkb2N0eXBlIGh0bWw+CjxodG1sIGxhbmc9InpoLUNOIj4KICA8aGVhZD4KICAgIDxtZXRhIGNoYXJzZXQ9IlVURi04IiAvPgogICAgPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xLjAiIC8+CiAgICA8bGluayByZWw9Imljb24iIHR5cGU9ImltYWdlL3N2Zyt4bWwiIGhyZWY9Ii9mYXZpY29uLnN2ZyIgLz4KICAgIDxtZXRhCiAgICAgIG5hbWU9ImRlc2NyaXB0aW9uIgogICAgICBjb250ZW50PSJUb3BpY1Njb3BlIOmAiemimOmbt+i+vu+8mueUqOS4gOS4quaWueWQkeivjeeci+a4hei/meS4qumihuWfn+W3sue7j+iiq+WBmui/h+S7gOS5iOOAgei/mOWJqeWTquS6m+epuueZve+8jOW5tuaKiuiuuuaWh+mHjOWvueS4jeS4iueahOaMh+agh+WPo+W+hOWvuem9kOOAgiIKICAgIC8+CiAgICA8dGl0bGU+VG9waWNTY29wZSDCtyDpgInpopjpm7fovr48L3RpdGxlPgogICAgPHNjcmlwdCB0eXBlPSJtb2R1bGUiIGNyb3Nzb3JpZ2luIHNyYz0iL2Fzc2V0cy9pbmRleC1EaFgwbXJmay5qcyI+PC9zY3JpcHQ+CiAgICA8bGluayByZWw9Im1vZHVsZXByZWxvYWQiIGNyb3Nzb3JpZ2luIGhyZWY9Ii9hc3NldHMvZXhwb3J0LURBUzB0eEk1LmpzIj4KICAgIDxsaW5rIHJlbD0ic3R5bGVzaGVldCIgY3Jvc3NvcmlnaW4gaHJlZj0iL2Fzc2V0cy9pbmRleC1DRHhlb21PcS5jc3MiPgogIDwvaGVhZD4KICA8Ym9keT4KICAgIDxkaXYgaWQ9InJvb3QiPjwvZGl2PgogIDwvYm9keT4KPC9odG1sPgo="},"actionId":"a80f9e92-0d48-40eb-9a69-7837875a42c1","projectId":"01a1b047-77cd-72ce-a523-5e8578d370b4","siteId":"01a1b047-77d0-7be8-804c-ba366e1ff832","deploymentId":"01a1d4c5-e03f-79c9-b311-f56b713d7753","artifactSha256":"ac672bfb3a9e1a244150cb064fb619479203369b714643080ab200d278b5eb43","indexSha256":"5ee035d2a8d8f705f3edfd022f60928e0c3129e1b41c5d702225ee934cb5df2d","releaseId":"01a1d4c7-d938-7a5d-84a9-4cff21b94d7d","indexHtml":"PCFkb2N0eXBlIGh0bWw+CjxodG1sIGxhbmc9InpoLUNOIj4KICA8aGVhZD4KICAgIDxtZXRhIGNoYXJzZXQ9IlVURi04IiAvPgogICAgPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xLjAiIC8+CiAgICA8bGluayByZWw9Imljb24iIHR5cGU9ImltYWdlL3N2Zyt4bWwiIGhyZWY9Ii9mYXZpY29uLnN2ZyIgLz4KICAgIDxtZXRhCiAgICAgIG5hbWU9ImRlc2NyaXB0aW9uIgogICAgICBjb250ZW50PSJUb3BpY1Njb3BlIOmAiemimOmbt+i+vu+8mueUqOS4gOS4quaWueWQkeivjeeci+a4hei/meS4qumihuWfn+W3sue7j+iiq+WBmui/h+S7gOS5iOOAgei/mOWJqeWTquS6m+epuueZve+8jOW5tuaKiuiuuuaWh+mHjOWvueS4jeS4iueahOaMh+agh+WPo+W+hOWvuem9kOOAgiIKICAgIC8+CiAgICA8dGl0bGU+VG9waWNTY29wZSDCtyDpgInpopjpm7fovr48L3RpdGxlPgogICAgPHNjcmlwdCB0eXBlPSJtb2R1bGUiIGNyb3Nzb3JpZ2luIHNyYz0iL2Fzc2V0cy9pbmRleC1EaFgwbXJmay5qcyI+PC9zY3JpcHQ+CiAgICA8bGluayByZWw9Im1vZHVsZXByZWxvYWQiIGNyb3Nzb3JpZ2luIGhyZWY9Ii9hc3NldHMvZXhwb3J0LURBUzB0eEk1LmpzIj4KICAgIDxsaW5rIHJlbD0ic3R5bGVzaGVldCIgY3Jvc3NvcmlnaW4gaHJlZj0iL2Fzc2V0cy9pbmRleC1DRHhlb21PcS5jc3MiPgogIDwvaGVhZD4KICA8Ym9keT4KICAgIDxkaXYgaWQ9InJvb3QiPjwvZGl2PgogIDwvYm9keT4KPC9odG1sPgo="}
+{
+  "version": 1,
+  "name": "TopicScope",
+  "design": {
+    "version": 1,
+    "pages": [
+      {
+        "id": "home",
+        "path": "/",
+        "title": "TopicScope · 选题雷达",
+        "width": 1440,
+        "height": 900,
+        "elements": [
+          {
+            "selector": "header",
+            "title": "站点标题与检索入口"
+          },
+          {
+            "selector": "input[placeholder=\"输入研究方向，例如 medical image segmentation\"]",
+            "title": "研究方向输入框"
+          },
+          {
+            "selector": "button:has-text(\"在线检索\")",
+            "title": "在线检索按钮"
+          },
+          {
+            "selector": "button:has-text(\"离线示例\")",
+            "title": "离线示例按钮"
+          },
+          {
+            "selector": "[role=\"tablist\"]",
+            "title": "功能页签（含文献综述）"
+          },
+          {
+            "selector": "[role=\"tabpanel\"]",
+            "title": "当前功能面板"
+          },
+          {
+            "selector": "button:has-text(\"生成方向建议\")",
+            "title": "生成研究方向建议按钮"
+          },
+          {
+            "selector": "button:has-text(\"导师汇报\")",
+            "title": "导师汇报对比页入口"
+          },
+          {
+            "selector": "svg[role=\"img\"]",
+            "title": "方向按年发文量趋势图"
+          },
+          {
+            "selector": "button:has-text(\"生成综述草稿\")",
+            "title": "生成文献综述草稿按钮"
+          },
+          {
+            "selector": "button:has-text(\"生成研究方案\")",
+            "title": "生成研究方案按钮"
+          },
+          {
+            "selector": "button:has-text(\"导出方案 Markdown\")",
+            "title": "导出研究方案按钮"
+          },
+          {
+            "selector": "button:has-text(\"保存会话\")",
+            "title": "保存研究会话按钮"
+          },
+          {
+            "selector": "[role=\"dialog\"]",
+            "title": "论文证据卡与导师汇报面板"
+          },
+          {
+            "selector": "canvas",
+            "title": "关键词共现力导向图"
+          },
+          {
+            "selector": "footer",
+            "title": "数据来源与免责说明"
+          }
+        ]
+      }
+    ],
+    "capabilities": [
+      "appearance",
+      "radius",
+      "spacing",
+      "typography",
+      "motion"
+    ]
+  },
+  "publication": {
+    "actionId": "4a50c2f4-1856-4f8e-aa8d-c95ab6792704",
+    "projectId": "01a1b047-77cd-72ce-a523-5e8578d370b4",
+    "siteId": "01a1b047-77d0-7be8-804c-ba366e1ff832",
+    "deploymentId": "01a20b8e-fdce-7c6e-89a5-6c4ac82ddb31",
+    "artifactSha256": "893ab5effd30c16505e32f25ea9fc1104aa68033a9b4bd91af5e8e860b3f13d0",
+    "indexSha256": "7ba8dfe1478a3ad770e441867114c4165c87c524331c65cae5a7fb9d402051d3",
+    "indexHtml": "PCFkb2N0eXBlIGh0bWw+CjxodG1sIGxhbmc9InpoLUNOIj4KICA8aGVhZD4KICAgIDxtZXRhIGNoYXJzZXQ9IlVURi04IiAvPgogICAgPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xLjAiIC8+CiAgICA8bGluayByZWw9Imljb24iIHR5cGU9ImltYWdlL3N2Zyt4bWwiIGhyZWY9Ii9mYXZpY29uLnN2ZyIgLz4KICAgIDxtZXRhCiAgICAgIG5hbWU9ImRlc2NyaXB0aW9uIgogICAgICBjb250ZW50PSJUb3BpY1Njb3BlIOmAiemimOmbt+i+vu+8mueUqOS4gOS4quaWueWQkeivjeeci+a4hei/meS4qumihuWfn+W3sue7j+iiq+WBmui/h+S7gOS5iOOAgei/mOWJqeWTquS6m+epuueZve+8jOW5tuaKiuiuuuaWh+mHjOWvueS4jeS4iueahOaMh+agh+WPo+W+hOWvuem9kOOAgiIKICAgIC8+CiAgICA8dGl0bGU+VG9waWNTY29wZSDCtyDpgInpopjpm7fovr48L3RpdGxlPgogICAgPHNjcmlwdCB0eXBlPSJtb2R1bGUiIGNyb3Nzb3JpZ2luIHNyYz0iL2Fzc2V0cy9pbmRleC1EZ0pqdm56SS5qcyI+PC9zY3JpcHQ+CiAgICA8bGluayByZWw9Im1vZHVsZXByZWxvYWQiIGNyb3Nzb3JpZ2luIGhyZWY9Ii9hc3NldHMvZXhwb3J0LUN5ZWd3QWJTLmpzIj4KICAgIDxsaW5rIHJlbD0ic3R5bGVzaGVldCIgY3Jvc3NvcmlnaW4gaHJlZj0iL2Fzc2V0cy9pbmRleC1DdFBsbEpxRS5jc3MiPgogIDwvaGVhZD4KICA8Ym9keT4KICAgIDxkaXYgaWQ9InJvb3QiPjwvZGl2PgogIDwvYm9keT4KPC9odG1sPgo=",
+    "releaseId": "01a20b8f-f805-7ec1-bf5c-9d1ade86ed18"
+  },
+  "actionId": "4a50c2f4-1856-4f8e-aa8d-c95ab6792704",
+  "projectId": "01a1b047-77cd-72ce-a523-5e8578d370b4",
+  "siteId": "01a1b047-77d0-7be8-804c-ba366e1ff832",
+  "deploymentId": "01a20b8e-fdce-7c6e-89a5-6c4ac82ddb31",
+  "artifactSha256": "893ab5effd30c16505e32f25ea9fc1104aa68033a9b4bd91af5e8e860b3f13d0",
+  "indexSha256": "7ba8dfe1478a3ad770e441867114c4165c87c524331c65cae5a7fb9d402051d3",
+  "indexHtml": "PCFkb2N0eXBlIGh0bWw+CjxodG1sIGxhbmc9InpoLUNOIj4KICA8aGVhZD4KICAgIDxtZXRhIGNoYXJzZXQ9IlVURi04IiAvPgogICAgPG1ldGEgbmFtZT0idmlld3BvcnQiIGNvbnRlbnQ9IndpZHRoPWRldmljZS13aWR0aCwgaW5pdGlhbC1zY2FsZT0xLjAiIC8+CiAgICA8bGluayByZWw9Imljb24iIHR5cGU9ImltYWdlL3N2Zyt4bWwiIGhyZWY9Ii9mYXZpY29uLnN2ZyIgLz4KICAgIDxtZXRhCiAgICAgIG5hbWU9ImRlc2NyaXB0aW9uIgogICAgICBjb250ZW50PSJUb3BpY1Njb3BlIOmAiemimOmbt+i+vu+8mueUqOS4gOS4quaWueWQkeivjeeci+a4hei/meS4qumihuWfn+W3sue7j+iiq+WBmui/h+S7gOS5iOOAgei/mOWJqeWTquS6m+epuueZve+8jOW5tuaKiuiuuuaWh+mHjOWvueS4jeS4iueahOaMh+agh+WPo+W+hOWvuem9kOOAgiIKICAgIC8+CiAgICA8dGl0bGU+VG9waWNTY29wZSDCtyDpgInpopjpm7fovr48L3RpdGxlPgogICAgPHNjcmlwdCB0eXBlPSJtb2R1bGUiIGNyb3Nzb3JpZ2luIHNyYz0iL2Fzc2V0cy9pbmRleC1EZ0pqdm56SS5qcyI+PC9zY3JpcHQ+CiAgICA8bGluayByZWw9Im1vZHVsZXByZWxvYWQiIGNyb3Nzb3JpZ2luIGhyZWY9Ii9hc3NldHMvZXhwb3J0LUN5ZWd3QWJTLmpzIj4KICAgIDxsaW5rIHJlbD0ic3R5bGVzaGVldCIgY3Jvc3NvcmlnaW4gaHJlZj0iL2Fzc2V0cy9pbmRleC1DdFBsbEpxRS5jc3MiPgogIDwvaGVhZD4KICA8Ym9keT4KICAgIDxkaXYgaWQ9InJvb3QiPjwvZGl2PgogIDwvYm9keT4KPC9odG1sPgo=",
+  "releaseId": "01a20b8f-f805-7ec1-bf5c-9d1ade86ed18"
+}

@@ -8,9 +8,16 @@ const FENCE = /^\s*```/;
 const HEADING = /^(#{1,3})\s+(.*)$/;
 const OL = /^\s*\d+\.\s+/;
 const UL = /^\s*[-*]\s+/;
+const QUOTE = /^\s*>\s?/;
+const TABLE_DIVIDER = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 
-function isBlockStart(line: string): boolean {
-  return FENCE.test(line) || HEADING.test(line) || OL.test(line) || UL.test(line);
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+function isBlockStart(line: string, next = ""): boolean {
+  return FENCE.test(line) || HEADING.test(line) || OL.test(line) || UL.test(line) || QUOTE.test(line) ||
+    (line.includes("|") && TABLE_DIVIDER.test(next));
 }
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
@@ -110,6 +117,39 @@ function renderBlocks(text: string): ReactNode[] {
       continue;
     }
 
+    if (QUOTE.test(line)) {
+      const quote: string[] = [];
+      while (i < lines.length && QUOTE.test(lines[i])) {
+        quote.push(lines[i].replace(QUOTE, ""));
+        i++;
+      }
+      out.push(
+        <blockquote key={k++} className="border-l-2 border-border pl-3 text-muted-foreground">
+          {quote.map((item, j) => <p key={j}>{renderInline(item, `q${k}-${j}`)}</p>)}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && TABLE_DIVIDER.test(lines[i + 1])) {
+      const headers = tableCells(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        rows.push(tableCells(lines[i]));
+        i++;
+      }
+      out.push(
+        <div key={k++} className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm">
+            <thead><tr>{headers.map((cell, j) => <th key={j} className="border border-border px-2 py-1 font-semibold">{renderInline(cell, `th${k}-${j}`)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, j) => <tr key={j}>{headers.map((_, c) => <td key={c} className="border border-border px-2 py-1 align-top">{renderInline(row[c] ?? "", `td${k}-${j}-${c}`)}</td>)}</tr>)}</tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
     if (OL.test(line)) {
       const items: string[] = [];
       while (i < lines.length && OL.test(lines[i])) {
@@ -145,7 +185,7 @@ function renderBlocks(text: string): ReactNode[] {
     }
 
     const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i], lines[i + 1])) {
       para.push(lines[i]);
       i++;
     }

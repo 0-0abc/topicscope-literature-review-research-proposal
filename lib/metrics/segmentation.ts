@@ -1,5 +1,10 @@
 import type { SegmentationClass } from "./types";
 
+/** 由交集与两面积还原并集，避免编辑任一面积后仍使用陈旧 union。 */
+export function withSegmentationUnion(item: SegmentationClass): SegmentationClass {
+  return { ...item, union: item.predArea + item.gtArea - item.intersection };
+}
+
 export interface SegmentationStat {
   label: string;
   iou: number | null;

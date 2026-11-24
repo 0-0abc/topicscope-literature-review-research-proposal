@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeTopics, type RadarResult } from "@/lib/analysis/radar";
 import { buildCooccurrence, topPairs, type CooccurrenceGraph, type TermPair } from "@/lib/analysis/cooccurrence";
 import { retrieve } from "@/lib/data/retrieval";
@@ -57,6 +57,46 @@ const INITIAL: CorpusState = {
 
 export function useCorpus() {
   const [state, setState] = useState<CorpusState>(INITIAL);
+  const requestSequenceRef = useRef(0);
+  const pendingRef = useRef(false);
+
+  // 所有会替换语料的入口共用请求序号与加载锁：按钮、Enter、离线快照和档案恢复
+  // 都不能让过期请求回写，也不能在加载中重复触发检索。
+  const beginRequest = useCallback((query: string, offline: boolean): number | null => {
+    if (pendingRef.current) return null;
+    pendingRef.current = true;
+    const requestId = ++requestSequenceRef.current;
+    setState({ ...INITIAL, status: "loading", query, offline });
+    return requestId;
+  }, []);
+
+  const isLatestRequest = useCallback(
+    (requestId: number) => pendingRef.current && requestSequenceRef.current === requestId,
+    [],
+  );
+
+  const finishRequest = useCallback((requestId: number): boolean => {
+    if (!isLatestRequest(requestId)) return false;
+    pendingRef.current = false;
+    return true;
+  }, [isLatestRequest]);
+
+  const failRequest = useCallback((requestId: number, error: string) => {
+    if (!finishRequest(requestId)) return;
+    // 失败时也回到空语料，不能把上一轮 papers/radar/report 当作当前样本继续使用。
+    setState((prev) => ({
+      ...INITIAL,
+      status: "error",
+      query: prev.query,
+      offline: prev.offline,
+      error,
+    }));
+  }, [finishRequest]);
+
+  useEffect(() => () => {
+    requestSequenceRef.current += 1;
+    pendingRef.current = false;
+  }, []);
 
   const analyze = useCallback(
     (
@@ -115,9 +155,11 @@ export function useCorpus() {
   );
 
   const loadSnapshot = useCallback(async () => {
-    setState((prev) => ({ ...prev, status: "loading", error: null }));
+    const requestId = beginRequest("", true);
+    if (requestId === null) return;
     try {
       const snapshot = await fetchSnapshot();
+      if (!isLatestRequest(requestId)) return;
       analyze(
         snapshot.papers,
         "snapshot",
@@ -127,28 +169,26 @@ export function useCorpus() {
         false,
         snapshot.report,
       );
+      finishRequest(requestId);
     } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : "离线快照加载失败",
-      }));
+      failRequest(
+        requestId,
+        error instanceof Error ? error.message : "离线快照加载失败",
+      );
     }
-  }, [analyze]);
+  }, [analyze, beginRequest, failRequest, finishRequest, isLatestRequest]);
 
   const searchOnline = useCallback(
     async (query: string, apiKey?: string, force = false) => {
       const trimmed = query.trim();
       if (!trimmed) return;
-      setState((prev) => ({ ...prev, status: "loading", error: null }));
+      const requestId = beginRequest(trimmed, false);
+      if (requestId === null) return;
       try {
         const result = await retrieve(trimmed, { apiKey, force });
+        if (!isLatestRequest(requestId)) return;
         if (result.papers.length === 0) {
-          setState((prev) => ({
-            ...prev,
-            status: "error",
-            error: `未检索到「${trimmed}」相关结果，换个说法试试`,
-          }));
+          failRequest(requestId, `未检索到「${trimmed}」相关结果，换个说法试试`);
           return;
         }
         // 服务端多源检索在状态栏归并展示为主源（报告里保留逐源明细）
@@ -163,15 +203,15 @@ export function useCorpus() {
           result.degraded,
           result.report,
         );
+        finishRequest(requestId);
       } catch (error) {
-        setState((prev) => ({
-          ...prev,
-          status: "error",
-          error: error instanceof Error ? error.message : "在线检索失败",
-        }));
+        failRequest(
+          requestId,
+          error instanceof Error ? error.message : "在线检索失败",
+        );
       }
     },
-    [analyze],
+    [analyze, beginRequest, failRequest, finishRequest, isLatestRequest],
   );
 
   const byId = useMemo(() => {
@@ -183,6 +223,9 @@ export function useCorpus() {
   /** 从研究档案恢复：论文与检索快照都在本地，不依赖网络。 */
   const restore = useCallback(
     (papers: Paper[], report: SearchReport | null, query: string) => {
+      // 档案恢复是同步的新样本，立即使仍在途的检索/快照失效。
+      requestSequenceRef.current += 1;
+      pendingRef.current = false;
       const source = report?.sourceReports?.[0]?.source;
       const paperSource: PaperSource =
         source === "openalex" ? "openalex" : source === "crossref" ? "crossref" : "snapshot";

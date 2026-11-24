@@ -352,10 +352,12 @@ export function integrityCheck(
     decision = "reject";
     notes.push("存在 CRITICAL 级致命缺陷，结论已按规则降级为「拒绝并转向」。");
   }
-  const strong = result.dimensions.filter((d) => d.score >= 8).length;
+  const strong = result.dimensions.filter(
+    (d) => d.score >= 8 && (d.basis === "data" || d.basis === "mechanism"),
+  ).length;
   if (decision === "accept" && strong < 2) {
     decision = "revise";
-    notes.push(`「强烈接受」需要至少两个维度 ≥8 分，当前只有 ${strong} 个，已降级为「修改后接受」。`);
+    notes.push(`「强烈接受」需要至少两个有数据或机制依据的维度 ≥8 分，当前只有 ${strong} 个，已降级为「修改后接受」。`);
   }
   for (const dim of result.dimensions) {
     if (dim.basis === "none" && dim.score > 5) {

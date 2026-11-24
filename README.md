@@ -43,17 +43,17 @@
 - **`src/`**：入口。`main.tsx`、`App.tsx`（页签编排与全局状态接线）、`globals.css`。路径别名 `@` 指向项目根目录，`components/`、`hooks/`、`lib/` 都在根下。
 - **`components/`**：UI 层。各页签视图（RadarView / AlignView / LibraryView / ReviewGenerator / FeasibilityChecker / PlanGenerator / SessionArchive 等）、证据卡与共现图，`ui/` 为 shadcn 基础组件。
 - **`hooks/`**：状态层。`useCorpus`（检索 + 分析流水线）、`useEvidenceStore`（证据标注，localStorage）、`useSessionStore`（研究档案，IndexedDB）、`useScoreContext`（评分拆解）、`useFunctionProbe`（AI 服务状态探测）。
-- **`lib/data/`**：检索适配。`retrieval.ts` 主流程为 本地缓存（同一检索词 12 小时）→ 站点服务端 Function（OpenAlex 主源与 Semantic Scholar 第二主源**并行请求后合并去重**，OpenAlex 不可用才降级 Crossref，服务端共享缓存 12 小时）→ 浏览器直连 OpenAlex/Crossref 仅作兜底；另有去重、DOI 归一、相关性过滤、离线快照加载与类型。
+- **`lib/data/`**：检索适配。`retrieval.ts` 主流程为 本地缓存（同一检索词 12 小时）→ 站点服务端 Function（OpenAlex 主源与 Semantic Scholar 第二主源**并行请求后合并去重**，OpenAlex 不可用才降级 Crossref，服务端共享缓存：成功结果 12 小时，0 命中或任一来源故障只缓存 2 分钟）→ 浏览器直连 OpenAlex/Crossref 仅作兜底；另有去重、DOI 归一、相关性过滤、离线快照加载与类型。
 - **`lib/analysis/`**：分词 → TF-IDF → 球面 k-means（固定种子可复现）→ `radar.ts` 聚类与覆盖判定；`cooccurrence.ts` 共现图（lift 筛选）；`scoring.ts` 六维评分；`advisorReport.ts` 规则生成的导师汇报。
-- **`lib/metrics/`**：26 个指标的实现与口径注册表、换算规则与「不可互推」清单；`selfcheck.ts` 50 个自检用例，期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，不共用代码路径。
-- **`lib/ai/`**：四个生成器 `directions` / `review` / `feasibility` / `plan`。负责构造发送载荷（统计数字 + 证据 ID 白名单 + 编号文献）、客户端解析与校验（`parseSuggestions` / `parseReview` / `parseFeasibility` / `parsePlan`）、证据回查、综述质量门禁、体检完整性自检与 Markdown 导出；`grounding.ts` 做正文数字与统计白名单的逐条回查。
+- **`lib/metrics/`**：26 个指标的实现与口径注册表、换算规则与「不可互推」清单；`selfcheck.ts` 56 个自检用例，期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，不共用代码路径。
+- **`lib/ai/`**：五个生成器 `directions` / `review` / `feasibility` / `plan` / `chat`。负责构造发送载荷（统计数字 + 证据 ID 白名单 + 编号文献）、客户端解析与校验（`parseSuggestions` / `parseReview` / `parseFeasibility` / `parsePlan`）、证据回查、综述质量门禁、体检完整性自检与 Markdown 导出；`grounding.ts` 做正文数字与统计白名单的逐条回查。
 - **`functions/handler.ts`**：站点唯一后端（Deno Edge Function，`index.ts` 为部署入口）。动作白名单：`search`（GET，双主源并行检索 + 12h 共享缓存）/ `directions` / `review` / `feasibility` / `plan` / `chat` / `status`（GET 探测配置与上游鉴权状态）。模型 key 与检索 key 只从服务端环境变量读取；输入做形状校验、证据 ID 白名单过滤；模型动作同 IP 限流 20 次 / 10 分钟 + 单实例日预算 400，检索同 IP 30 次 / 10 分钟；请求体上限 96 KB，上游超时 60 秒（检索 15–20 秒）。
 
 ## 数据与隐私
 
 - **分析全部在浏览器本地**：聚类、覆盖判定、共现、评分、指标换算不上传任何文献内容。
-- **在线检索**把检索词发往站点服务端 Function，由服务端**并行**请求 OpenAlex 主源与 Semantic Scholar 第二主源，回来后按 DOI/标题合并去重（OpenAlex 不可用才降级 Crossref），服务端共享缓存 12 小时；命中缓存时不重复请求上游。输入为**中文**检索词时，服务端先由模型译成英文（机器翻译可能有偏差，原词与译词都写进检索快照），OpenAlex 用「英文|中文」并列检索、Semantic Scholar 用英文、Crossref 按中文原题补充中文期刊，三源并行合并去重；译词会**核对专有名词**（算法/模型/数据集/缩写名）是否原样保留，被丢掉的自动补回检索词并写入检索快照。
-- **AI 生成**（方向建议 / 综述 / 体检 / 方案）把统计数字、论文标题与摘要节选、以及你勾选的已核对证据，经同源 Function 发送到站点自带的模型服务；模型 key 不在前端。
+- **在线检索**把检索词发往站点服务端 Function，由服务端**并行**请求 OpenAlex 主源与 Semantic Scholar 第二主源，回来后按 DOI/标题合并去重（OpenAlex 不可用才降级 Crossref），服务端共享缓存：成功结果 12 小时，0 命中或任一来源故障只缓存 2 分钟；命中缓存时不重复请求上游。输入为**中文**检索词时，服务端先由模型译成英文（机器翻译可能有偏差，原词与译词都写进检索快照），OpenAlex 用「英文|中文」并列检索、Semantic Scholar 用英文、Crossref 按中文原题补充中文期刊，三源并行合并去重；译词会**核对专有名词**（算法/模型/数据集/缩写名）是否原样保留，被丢掉的自动补回检索词并写入检索快照。
+- **AI 生成**（方向建议 / 综述 / 体检 / 方案 / 对话）把统计数字、论文标题与摘要节选、以及你勾选的已核对证据，经同源 Function 发送到站点自带的模型服务；模型 key 不在前端。
 - **本机存储**：研究档案存 IndexedDB（`topicscope`），证据标注、检索缓存、可选 OpenAlex key 存 localStorage。
 - 服务端 Secret 不进入站点代码、构建产物或任何响应。
 
@@ -90,8 +90,8 @@ npm run check:function  # deno check functions/index.ts
 ## 测试与自检
 
 ```sh
-node_modules/.bin/jiti dev/run-selfcheck.ts   # 指标自检，输出「自检 50/50 通过」，失败时退出码非 0
-node_modules/.bin/jiti dev/run-analysis.ts    # 在离线快照上跑聚类与共现的冒烟检查
+npx --yes jiti dev/run-selfcheck.ts   # 指标自检，输出「自检 56/56 通过」，失败时退出码非 0
+npx --yes jiti dev/run-analysis.ts    # 在离线快照上跑聚类与共现的冒烟检查
 ```
 
 - 自检期望值来自 `dev/selfcheck_reference.py` 的独立实现（只共享数学定义），页面「指标口径对齐」里也内置同一份自检面板。
@@ -99,12 +99,13 @@ node_modules/.bin/jiti dev/run-analysis.ts    # 在离线快照上跑聚类与�
 
 ## 验证
 
-**已做的自动化验证**（`npm run regression`，即 `node scripts/regression.mjs`，共 348 条断言，全程不触网、不改源文件）：
+**已做的自动化验证**（`npm run regression`，即 `node scripts/regression.mjs`，共 474 条断言，全程不触网、不改源文件）：
 
-- **判定阈值稳定性回归**：对增长窗口 / 高密度成熟的判定阈值（10% / 12% / 60%）做 ±20% 扰动，在同一批稀疏簇夹具上重跑判定，稀疏簇不翻转（翻转 0 次），并断言 6/6 组扰动确实生效（非空跑）。
-- **指标换算交叉验证**：50 项自检的期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，与 TypeScript 实现只共享数学定义、不共用代码路径，50/50 通过。
+- **判定阈值边界与稳定性回归**：直接覆盖 emerging/saturated 的 10% / 12% / 60% 边界；另对三个阈值做 ±20% 扰动，在同一批稀疏簇夹具上验证保护规则不翻转，并断言 6/6 组扰动确实生效。阈值扰动测试只证明稀疏保护规则稳定，不冒充完整分类稳定性。
+- **指标换算交叉验证**：56 项自检的期望值由独立 Python 参考实现（`dev/selfcheck_reference.py`）算出，与 TypeScript 实现只共享数学定义、不共用代码路径，56/56 通过；新增计数转混淆矩阵与分割 union 重算路径。
 - **本地门禁**：综述 / 体检 / 方案每次生成后都在前端本地跑校验——综述质量门禁（引用 / 交织 / 分寸）、体检完整性自检（结论与分数矛盾时自动降级）、方案解析与证据白名单；其中综述门禁、方案解析与正文数字回查已纳入回归断言。
-- **服务端检索回归**：esbuild 打包自包含 handler + 按 hostname 分发的上游 mock，断言双主源并行发起、S2 带 `x-api-key` 且相邻请求 ≥1.1 秒、429 退避重试一次后仅主源、请求成功但 0 命中不报故障、OpenAlex 故障才降级 Crossref 且按检索词过滤、12h 共享缓存与 refresh 绕过、导出头部检索快照元数据。
+- **服务端检索回归**：esbuild 打包自包含 handler + 按 hostname 分发的上游 mock，断言双主源并行发起、S2 带 `x-api-key` 且相邻请求 ≥1.1 秒、429 退避重试一次后仅主源、请求成功但 0 命中不报故障、OpenAlex 故障才降级 Crossref 且按检索词过滤、12h 成功缓存与 2 分钟故障/0 命中缓存、refresh 绕过、导出头部检索快照元数据。
+- **安全与状态回归**：Markdown 危险协议/HTML 保持纯文本、表格与代码围栏渲染；对话正文内误塞的 refs/evidenceIds/证据 ID 会被清洗并恢复为独立结构化字段，旧存档渲染与导出同样生效；中文按 UTF-8 字节限制请求体；非法请求不扣模型预算；`C++` 专名核对；历史论文证据过滤；方案引用与证据索引由白名单重建；Service Worker 升级保留最近三个版本，旧页面懒加载 chunk 可回退旧缓存。
 
 **未做的验证（诚实口径）**：
 
@@ -129,8 +130,8 @@ node_modules/.bin/jiti dev/run-analysis.ts    # 在离线快照上跑聚类与�
 ├── lib/
 │   ├── data/             # OpenAlex / Crossref 适配、缓存、去重、快照
 │   ├── analysis/         # 分词、TF-IDF、k-means、判定、共现、评分
-│   ├── metrics/          # 26 指标、换算注册表、50 项自检
-│   ├── ai/               # 四个生成器的载荷、解析校验与导出
+│   ├── metrics/          # 26 指标、换算注册表、56 项自检
+│   ├── ai/               # 五个生成器的载荷、解析校验与导出
 │   └── api.ts 等         # 同源 Function 调用封装与工具
 ├── functions/            # Edge Function：handler.ts + index.ts（Deno）
 ├── dev/                  # 本地脚本：自检、分析冒烟、快照抓取、Function 联调

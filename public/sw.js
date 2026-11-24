@@ -16,7 +16,9 @@
 const VERSION = "topicscope-v2";
 const SHELL_CACHE = VERSION + "-shell";
 const ASSET_CACHE = VERSION + "-assets";
-const KEEP_CACHES = [SHELL_CACHE, ASSET_CACHE];
+const CACHE_PREFIX = "topicscope-";
+const MAX_VERSION_CACHES = 3;
+const CACHE_MARKER = "/__topicscope_cache_version__";
 
 /** 与 lib/data/snapshot.ts 的 SNAPSHOT_URL 一致（sw.js 无法 import TS，故在此同步声明）。 */
 const SNAPSHOT_URL = "/data/snapshot-medical-segmentation.json";
@@ -40,6 +42,11 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(SHELL_CACHE);
+      const installedAt = Date.now();
+      const marker = new Response(JSON.stringify({ version: VERSION, installedAt }), {
+        headers: { "Content-Type": "application/json" },
+      });
+      await cache.put(CACHE_MARKER, marker.clone());
       // 逐个 add：单个资源缺失不应让整个外壳安装失败。
       await Promise.all(
         PRECACHE_URLS.map((url) =>
@@ -49,9 +56,10 @@ self.addEventListener("install", (event) => {
         ),
       );
       // 全量预缓存构建产物（含懒加载 chunk），断网首次切页签也能加载。
+      const assets = await caches.open(ASSET_CACHE);
+      await assets.put(CACHE_MARKER, marker.clone());
       try {
         const manifest = await (await fetch("/precache-manifest.json")).json();
-        const assets = await caches.open(ASSET_CACHE);
         await Promise.all(
           (manifest.urls || []).map((url) =>
             assets.add(url).catch((error) => {
@@ -62,6 +70,25 @@ self.addEventListener("install", (event) => {
       } catch (error) {
         console.warn("[sw] 读取预缓存清单失败:", error);
       }
+      // 按安装时间保留最近三个版本；旧页面升级过渡期间仍能取到旧 hash chunk。
+      const keys = await caches.keys();
+      const records = await Promise.all(
+        keys.filter((key) => key.startsWith(CACHE_PREFIX)).map(async (key) => {
+          const stored = await (await caches.open(key)).match(CACHE_MARKER);
+          let installedAt = 0;
+          try {
+            installedAt = (await stored?.json())?.installedAt ?? 0;
+          } catch { /* 旧缓存没有标记时优先清理 */ }
+          return { key, version: key.replace(/-(?:shell|assets)$/, ""), installedAt };
+        }),
+      );
+      const keepVersions = new Set(
+        [...new Set([...records].sort((a, b) => b.installedAt - a.installedAt).map((record) => record.version))]
+          .slice(0, MAX_VERSION_CACHES),
+      );
+      await Promise.all(
+        records.filter((record) => !keepVersions.has(record.version)).map((record) => caches.delete(record.key)),
+      );
       await self.skipWaiting();
     })(),
   );
@@ -72,7 +99,7 @@ self.addEventListener("activate", (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(
-        keys.filter((key) => KEEP_CACHES.indexOf(key) === -1).map((key) => caches.delete(key)),
+        keys.filter((key) => !key.startsWith(CACHE_PREFIX)).map((key) => caches.delete(key)),
       );
       await self.clients.claim();
     })(),
@@ -111,10 +138,22 @@ async function networkFirstNavigation(request) {
   }
 }
 
+async function cachedStatic(request, currentCache) {
+  const cached = await currentCache.match(request);
+  if (cached) return cached;
+  const keys = await caches.keys();
+  for (const key of keys.filter((name) => name.startsWith(CACHE_PREFIX) && name.endsWith("-assets"))) {
+    if (key === ASSET_CACHE) continue;
+    const legacy = await (await caches.open(key)).match(request);
+    if (legacy) return legacy;
+  }
+  return undefined;
+}
+
 async function staleWhileRevalidate(event) {
   const request = event.request;
   const cache = await caches.open(ASSET_CACHE);
-  const cached = await cache.match(request);
+  const cached = await cachedStatic(request, cache);
 
   const revalidate = fetch(request)
     .then((response) => {

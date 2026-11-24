@@ -135,6 +135,19 @@ function buildCannotConclude(
   }
 }
 
+export function classifyCoverage(
+  size: number,
+  sizeShare: number,
+  recentShare: number,
+  medianYear: number,
+  maxYear: number,
+): CoverageVerdict {
+  if (size < 10 || sizeShare < 0.05) return "insufficient";
+  if (sizeShare < 0.1 && recentShare >= 0.6) return "emerging";
+  if (sizeShare >= 0.12 && medianYear <= maxYear - 4 && recentShare <= 0.35) return "saturated";
+  return "mature";
+}
+
 export function analyzeTopics(papers: Paper[]): RadarResult {
   if (papers.length === 0) {
     return {
@@ -242,26 +255,22 @@ export function analyzeTopics(papers: Paper[]): RadarResult {
 
     const sizePct = (sizeShare * 100).toFixed(1);
     const recentPct = (recentShare * 100).toFixed(0);
-    let verdict: CoverageVerdict;
+    const verdict = classifyCoverage(size, sizeShare, recentShare, medianYear, maxYear);
     let verdictReason: string;
     let ruleTrace: string;
     if (size < 10 || sizeShare < 0.05) {
-      verdict = "insufficient";
       const hits: string[] = [];
       if (size < 10) hits.push(`size ${size} < 10`);
       if (sizeShare < 0.05) hits.push(`占比 ${sizePct}% < 5%`);
       ruleTrace = `${hits.join(" 且 ")} → 样本内稀疏 · 证据不足`;
       verdictReason = `样本内仅 ${size} 篇、占比 ${sizePct}%，样本内稀疏、证据不足；不能据此判断方向冷热，需扩大检索或补材料后再判断。`;
     } else if (sizeShare < 0.1 && recentShare >= 0.6) {
-      verdict = "emerging";
       ruleTrace = `占比 ${sizePct}% < 10% 且近三年 ${recentPct}% ≥ 60% → 增长窗口`;
       verdictReason = `样本内占比 ${sizePct}%，且样本内 ${recentPct}% 的论文集中在 ${recentThreshold}–${maxYear} 年；当前样本框（见检索快照）内近期占比高，不能证明真实发文增长，需独立检索验证。`;
     } else if (sizeShare >= 0.12 && medianYear <= maxYear - 4 && recentShare <= 0.35) {
-      verdict = "saturated";
       ruleTrace = `占比 ${sizePct}% ≥ 12% 且中位年份 ${medianYear} ≤ ${maxYear - 4} 且近三年 ${recentPct}% ≤ 35% → 高密度成熟方向`;
       verdictReason = `样本内占比 ${sizePct}%、中位发表年份 ${medianYear}，样本内早期工作较多，${recentThreshold} 年后新增很少。`;
     } else {
-      verdict = "mature";
       ruleTrace = `size ${size} ≥ 10 且占比 ${sizePct}% ≥ 5%，未命中增长窗口与高密度条件 → 稳定产出方向`;
       verdictReason = `样本内占比 ${sizePct}%，中位发表年份 ${medianYear}，样本内属于有稳定产出的常规方向。`;
     }

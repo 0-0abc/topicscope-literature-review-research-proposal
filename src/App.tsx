@@ -231,9 +231,9 @@ export default function App() {
               </label>
               <p className="text-[11px] leading-relaxed text-muted-foreground sm:max-w-md">
                 站点服务端已配置检索 key：在线检索默认走站点服务端（OpenAlex 主源 + Semantic Scholar
-                第二主源合并，Crossref 兜底），结果服务端缓存 12 小时供所有访客共享，不随访客数消耗额度。
+                第二主源合并，Crossref 兜底），成功结果缓存 12 小时供所有访客共享；0 命中或来源故障只短缓存 2 分钟，避免临时故障锁死。
                 这里填的个人 key 只在服务端不可用、浏览器直连回退时使用，仍只保存在本机 localStorage；
-                服务端检索时检索词会经过站点 Function（不经过模型服务）。
+                服务端检索时检索词会经过站点 Function；中文检索还会发给模型服务进行英文翻译，失败则退回原词。
               </p>
             </div>
           </div>
@@ -257,7 +257,7 @@ export default function App() {
       ) : null}
 
       {corpus.error ? (
-        <div className="border-b border-border bg-destructive/5">
+        <div role="alert" className="border-b border-border bg-destructive/5">
           <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-4 py-2 text-xs text-destructive">
             <span className="min-w-0 flex-1">{corpus.error}</span>
             <Button size="sm" variant="outline" onClick={handleRefresh} disabled={corpus.status === "loading"}>
@@ -290,14 +290,14 @@ export default function App() {
             <TabsTrigger
               value="radar"
               onClick={() => setGroup("radar")}
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+              className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               检索与雷达
             </TabsTrigger>
             <TabsTrigger
               value="library"
               onClick={() => setGroup("library")}
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+              className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               论文与证据
               {corpus.papers.length > 0 ? (
@@ -309,7 +309,7 @@ export default function App() {
             <TabsTrigger
               value="chat"
               onClick={() => setGroup("chat")}
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+              className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               研究对话
               {planDraft.length > 0 ? (
@@ -320,14 +320,14 @@ export default function App() {
             </TabsTrigger>
             <TabsTrigger
               value="output"
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+              className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               方案与档案
             </TabsTrigger>
             <TabsTrigger
               value="align"
               onClick={() => setGroup("align")}
-              className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+              className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
             >
               指标口径对齐
             </TabsTrigger>
@@ -391,25 +391,25 @@ export default function App() {
               >
                 <TabsTrigger
                   value="review"
-                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                  className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
                 >
                   文献综述
                 </TabsTrigger>
                 <TabsTrigger
                   value="checkup"
-                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                  className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
                 >
                   选题体检
                 </TabsTrigger>
                 <TabsTrigger
                   value="plan"
-                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                  className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
                 >
                   研究方案
                 </TabsTrigger>
                 <TabsTrigger
                   value="archive"
-                  className="rounded-none px-0 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
+                  className="min-h-11 rounded-none px-1 pb-2 text-[13px] data-[state=active]:text-foreground data-[state=active]:after:bg-foreground"
                 >
                   研究档案
                 </TabsTrigger>

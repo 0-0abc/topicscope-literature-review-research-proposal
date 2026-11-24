@@ -91,6 +91,20 @@ export function validateConfusionMatrix(
   return { ok: errors.length === 0, errors };
 }
 
+/**
+ * 二分类计数转为混淆矩阵：行 = 真实类别，列 = 预测类别。
+ * 正类是第二个类别，因此顺序固定为 [[TN, FP], [FN, TP]]。
+ */
+export function binaryCountsToMatrix(counts: BinaryCounts): ConfusionMatrix {
+  return {
+    labels: ["负类", "正类"],
+    m: [
+      [counts.tn, counts.fp],
+      [counts.fn, counts.tp],
+    ],
+  };
+}
+
 export function matrixTotal(matrix: ConfusionMatrix): number {
   let total = 0;
   for (const row of matrix.m) for (const value of row) total += value;
